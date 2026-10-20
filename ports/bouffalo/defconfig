@@ -1,0 +1,2 @@
+# Enable the SDK FreeRTOS component for the Bouffalo port.
+CONFIG_FREERTOS=y
