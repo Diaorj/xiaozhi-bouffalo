@@ -1,2 +1,17 @@
-# Enable the SDK FreeRTOS component for the Bouffalo port.
+# FreeRTOS and the verified FHOST Wi-Fi stack for BL616CL.
 CONFIG_FREERTOS=y
+CONFIG_TLSF=y
+CONFIG_LWIP=y
+# FHOST net_al_ext.c includes the SDK DHCP server adapter unconditionally.
+CONFIG_DHCPD=y
+CONFIG_RF=y
+CONFIG_WIFI6=y
+CONFIG_MACSW_SELECT=default
+CONFIG_FHOST=y
+CONFIG_WL80211=n
+# WPA supplicant uses the SDK crypto component even before HTTPS is added.
+CONFIG_MBEDTLS=y
+# The port uses a FreeRTOS mutex backend, not the SDK POSIX headers.
+CONFIG_POSIX=n
+CONFIG_SHELL=n
+CONFIG_LOG_NCOLOR=y

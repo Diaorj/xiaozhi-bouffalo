@@ -136,14 +136,14 @@ bool DeviceStateMachine::TransitionTo(DeviceState new_state) {
 }
 
 int DeviceStateMachine::AddStateChangeListener(StateCallback callback) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<PlatformMutex> lock(mutex_);
     int id = next_listener_id_++;
     listeners_.emplace_back(id, std::move(callback));
     return id;
 }
 
 void DeviceStateMachine::RemoveStateChangeListener(int listener_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<PlatformMutex> lock(mutex_);
     listeners_.erase(
         std::remove_if(listeners_.begin(), listeners_.end(),
             [listener_id](const auto& p) { return p.first == listener_id; }),
@@ -153,7 +153,7 @@ void DeviceStateMachine::RemoveStateChangeListener(int listener_id) {
 void DeviceStateMachine::NotifyStateChange(DeviceState old_state, DeviceState new_state) {
     std::vector<StateCallback> callbacks_copy;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<PlatformMutex> lock(mutex_);
         callbacks_copy.reserve(listeners_.size());
         for (const auto& [id, cb] : listeners_) {
             callbacks_copy.push_back(cb);
