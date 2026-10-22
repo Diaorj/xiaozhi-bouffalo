@@ -64,6 +64,11 @@
 #define configUSE_TICKLESS_IDLE                 0
 #define configUSE_POSIX_ERRNO                   1
 
+/* Keep lwIP task-local data in slot 0 and SDK pthread data in slot 1. */
+#define configNUM_THREAD_LOCAL_STORAGE_POINTERS 2
+#define configTHREAD_LOCAL_STORAGE_DELETE_CALLBACKS 1
+#define posixconfigPTHREAD_TLS_INDEX 1
+
 /* Co-routine definitions. */
 #define configUSE_CO_ROUTINES                   0
 #define configMAX_CO_ROUTINE_PRIORITIES         (2)

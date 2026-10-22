@@ -3,10 +3,10 @@
 
 #include <atomic>
 #include <functional>
+#include <mutex>
 #include <vector>
 
 #include "device_state.h"
-#include "platform/mutex.h"
 
 /**
  * DeviceStateMachine - Manages device state transitions with validation
@@ -67,7 +67,7 @@ private:
     std::atomic<DeviceState> current_state_{kDeviceStateUnknown};
     std::vector<std::pair<int, StateCallback>> listeners_;
     int next_listener_id_{0};
-    PlatformMutex mutex_;
+    std::mutex mutex_;
 
     /**
      * Check if transition from source to target is valid

@@ -11,7 +11,7 @@ CONFIG_FHOST=y
 CONFIG_WL80211=n
 # WPA supplicant uses the SDK crypto component even before HTTPS is added.
 CONFIG_MBEDTLS=y
-# The port uses a FreeRTOS mutex backend, not the SDK POSIX headers.
-CONFIG_POSIX=n
+# Use the SDK pthread backend for the original std::mutex.
+CONFIG_POSIX=y
 CONFIG_SHELL=n
 CONFIG_LOG_NCOLOR=y

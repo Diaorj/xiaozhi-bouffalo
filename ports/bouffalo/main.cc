@@ -1,4 +1,6 @@
+#include <atomic>
 #include <cstdio>
+#include <mutex>
 
 #include <esp_log.h>
 
@@ -10,21 +12,65 @@ extern "C" {
 #include "FreeRTOS.h"
 #include "board.h"
 #include "task.h"
-void __libc_init_array(void);
 }
 
 // A constructor probe also verifies the SDK's init-array path.
-static bool constructor_ran = false;
+static unsigned int constructor_runs = 0;
 struct ConstructorProbe {
-    ConstructorProbe() { constructor_ran = true; }
+    ConstructorProbe() { ++constructor_runs; }
 };
 static ConstructorProbe constructor_probe;
 
 static const char* const TAG = "XIAOZHI_PORT";
 
+namespace {
+constexpr unsigned int kMutexCheckIterations = 20;
+std::mutex mutex_check_lock;
+std::atomic<unsigned int> mutex_check_counter{0};
+TaskHandle_t mutex_check_owner;
+
+void IncrementWithMutex() {
+    for (unsigned int i = 0; i < kMutexCheckIterations; ++i) {
+        std::lock_guard<std::mutex> guard(mutex_check_lock);
+        const unsigned int before = mutex_check_counter.load(std::memory_order_relaxed);
+        // Force scheduling while holding the lock. The other task must wait.
+        vTaskDelay(pdMS_TO_TICKS(1));
+        mutex_check_counter.store(before + 1, std::memory_order_relaxed);
+    }
+}
+
+void MutexCheckWorker(void*) {
+    IncrementWithMutex();
+    xTaskNotifyGive(mutex_check_owner);
+    vTaskDelete(nullptr);
+}
+
+bool CheckStdMutex() {
+    ESP_LOGI(TAG, "MUTEX_CHECK_BEGIN: two tasks share std::mutex");
+    mutex_check_owner = xTaskGetCurrentTaskHandle();
+    if (xTaskCreate(MutexCheckWorker, "mutex_check", 1024, nullptr, 1, nullptr) != pdPASS) {
+        ESP_LOGW(TAG, "MUTEX_CHECK_FAILED: cannot create worker");
+        return false;
+    }
+    IncrementWithMutex();
+    const bool completed = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000)) != 0;
+    const unsigned int count = mutex_check_counter.load(std::memory_order_relaxed);
+    const bool ok = completed && count == 2 * kMutexCheckIterations;
+    ESP_LOGI(TAG, "MUTEX_CHECK_%s: counter=%u expected=%u", ok ? "OK" : "FAILED", count,
+             2 * kMutexCheckIterations);
+    return ok;
+}
+}  // namespace
+
 static void heartbeat_task(void* arg) {
     (void)arg;
     ESP_LOGI(TAG, "TASK_RUNNING: heartbeat");
+    if (!CheckStdMutex()) {
+        // The worker may still notify this task after a timeout; retain its handle.
+        for (;;) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
     // This is only a state-machine smoke test, not real activation or networking.
     DeviceStateMachine states;
     const int listener = states.AddStateChangeListener(
@@ -56,15 +102,13 @@ static void heartbeat_task(void* arg) {
 
 int main() {
     board_init();
-    // BL616CL startup does not call this; run global C++ constructors once,
-    // after board/heap initialization and before creating any application task.
-    __libc_init_array();
-    if (!constructor_ran) {
-        std::printf("[XIAOZHI_PORT] CXX_RUNTIME_FAILED\r\n");
+    // The SDK wraps main() to run global constructors. Do not run them again here.
+    if (constructor_runs != 1) {
+        std::printf("[XIAOZHI_PORT] CXX_RUNTIME_FAILED: constructors=%u\r\n", constructor_runs);
         while (true) {
         }
     }
-    std::printf("[XIAOZHI_PORT] CXX_RUNTIME_OK\r\n");
+    std::printf("[XIAOZHI_PORT] CXX_RUNTIME_OK: constructors=%u\r\n", constructor_runs);
     std::printf("\r\n[XIAOZHI_PORT] BOOT_OK: BL616CL C++ FreeRTOS entry\r\n");
 
     // Stack depth is in StackType_t units: 1024 * 4 bytes on BL616CL.
