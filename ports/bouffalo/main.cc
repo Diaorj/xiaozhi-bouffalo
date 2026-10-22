@@ -1,11 +1,15 @@
-#include <atomic>
 #include <cstdio>
-#include <mutex>
 
 #include <esp_log.h>
 
 #include "device_state_machine.h"
 #include "wifi_init.h"
+
+#if __has_include("wifi_config.h")
+#include "wifi_config.h"
+#else
+#include "wifi_config.example.h"
+#endif
 
 // These SDK and FreeRTOS functions are implemented in C.
 extern "C" {
@@ -23,54 +27,9 @@ static ConstructorProbe constructor_probe;
 
 static const char* const TAG = "XIAOZHI_PORT";
 
-namespace {
-constexpr unsigned int kMutexCheckIterations = 20;
-std::mutex mutex_check_lock;
-std::atomic<unsigned int> mutex_check_counter{0};
-TaskHandle_t mutex_check_owner;
-
-void IncrementWithMutex() {
-    for (unsigned int i = 0; i < kMutexCheckIterations; ++i) {
-        std::lock_guard<std::mutex> guard(mutex_check_lock);
-        const unsigned int before = mutex_check_counter.load(std::memory_order_relaxed);
-        // Force scheduling while holding the lock. The other task must wait.
-        vTaskDelay(pdMS_TO_TICKS(1));
-        mutex_check_counter.store(before + 1, std::memory_order_relaxed);
-    }
-}
-
-void MutexCheckWorker(void*) {
-    IncrementWithMutex();
-    xTaskNotifyGive(mutex_check_owner);
-    vTaskDelete(nullptr);
-}
-
-bool CheckStdMutex() {
-    ESP_LOGI(TAG, "MUTEX_CHECK_BEGIN: two tasks share std::mutex");
-    mutex_check_owner = xTaskGetCurrentTaskHandle();
-    if (xTaskCreate(MutexCheckWorker, "mutex_check", 1024, nullptr, 1, nullptr) != pdPASS) {
-        ESP_LOGW(TAG, "MUTEX_CHECK_FAILED: cannot create worker");
-        return false;
-    }
-    IncrementWithMutex();
-    const bool completed = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000)) != 0;
-    const unsigned int count = mutex_check_counter.load(std::memory_order_relaxed);
-    const bool ok = completed && count == 2 * kMutexCheckIterations;
-    ESP_LOGI(TAG, "MUTEX_CHECK_%s: counter=%u expected=%u", ok ? "OK" : "FAILED", count,
-             2 * kMutexCheckIterations);
-    return ok;
-}
-}  // namespace
-
 static void heartbeat_task(void* arg) {
     (void)arg;
     ESP_LOGI(TAG, "TASK_RUNNING: heartbeat");
-    if (!CheckStdMutex()) {
-        // The worker may still notify this task after a timeout; retain its handle.
-        for (;;) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
-    }
     // This is only a state-machine smoke test, not real activation or networking.
     DeviceStateMachine states;
     const int listener = states.AddStateChangeListener(
@@ -88,7 +47,7 @@ static void heartbeat_task(void* arg) {
     ESP_LOGI(TAG, "STATE_MACHINE_%s: current=%s (demo only)", ok ? "OK" : "FAILED",
              DeviceStateMachine::GetStateName(states.GetState()));
 
-    if (!StartWifiInitialization()) {
+    if (!StartWifiInitialization(XIAOZHI_WIFI_SSID, XIAOZHI_WIFI_PASSWORD)) {
         ESP_LOGW(TAG, "NETWORK_INIT_NOT_STARTED: heartbeat will continue");
     }
 

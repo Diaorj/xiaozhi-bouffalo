@@ -20,6 +20,9 @@ project(xiaozhi_bouffalo)
 target_sources(app PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/../../main/device_state_machine.cc"
     "${CMAKE_CURRENT_LIST_DIR}/wifi_init.cc"
+    "${CMAKE_CURRENT_LIST_DIR}/network_probe.cc"
+    "${CMAKE_CURRENT_LIST_DIR}/network_time.c"
+    "${CMAKE_CURRENT_LIST_DIR}/http_sdk_bridge.c"
     "${CMAKE_CURRENT_LIST_DIR}/wifi_sdk_bridge.c")
 
 # Keep the ESP log adapter local to application sources, not SDK libraries.
