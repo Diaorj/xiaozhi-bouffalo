@@ -1,5 +1,6 @@
 #include "wifi_init.h"
 #include "network_probe.h"
+#include "ota_check.h"
 #include "wifi_sdk_bridge.h"
 
 #include <cstring>
@@ -212,7 +213,9 @@ bool ConnectHotspot(TaskHandle_t task) {
 void NetworkTask(void*) {
     const TaskHandle_t task = xTaskGetCurrentTaskHandle();
     if (InitializeNetwork(task) && ConnectHotspot(task)) {
-        RunNetworkProbe();
+        if (RunNetworkProbe()) {
+            RunOtaCheck();
+        }
     }
     // Callbacks retain this handle, including a possibly late lwIP init callback.
     // Keep the task alive and blocked, so a timeout cannot leave a dangling handle.

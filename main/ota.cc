@@ -1,4 +1,5 @@
 #include "ota.h"
+#include "ota_check_response.h"
 #include "system_info.h"
 #include "settings.h"
 #include "assets/lang_config.h"
@@ -126,34 +127,27 @@ NetworkResult<> Ota::CheckVersion() {
     // Parse the JSON response and check if the version is newer
     // If it is, set has_new_version_ to true and store the new version and URL
     
-    cJSON *root = cJSON_Parse(data.c_str());
-    if (root == NULL) {
+    OtaCheckResponse response;
+    if (!response.Parse(data.data(), data.size())) {
         ESP_LOGE(TAG, "Failed to parse JSON response");
         return std::unexpected(NetworkError::ProtocolError());
     }
 
-    has_activation_code_ = false;
-    has_activation_challenge_ = false;
-    cJSON *activation = cJSON_GetObjectItem(root, "activation");
-    if (cJSON_IsObject(activation)) {
-        cJSON* message = cJSON_GetObjectItem(activation, "message");
-        if (cJSON_IsString(message)) {
-            activation_message_ = message->valuestring;
-        }
-        cJSON* code = cJSON_GetObjectItem(activation, "code");
-        if (cJSON_IsString(code)) {
-            activation_code_ = code->valuestring;
-            has_activation_code_ = true;
-        }
-        cJSON* challenge = cJSON_GetObjectItem(activation, "challenge");
-        if (cJSON_IsString(challenge)) {
-            activation_challenge_ = challenge->valuestring;
-            has_activation_challenge_ = true;
-        }
-        cJSON* timeout_ms = cJSON_GetObjectItem(activation, "timeout_ms");
-        if (cJSON_IsNumber(timeout_ms)) {
-            activation_timeout_ms_ = timeout_ms->valueint;
-        }
+    const cJSON* root = response.root();
+    const auto& activation = response.activation();
+    has_activation_code_ = activation.has_code;
+    has_activation_challenge_ = activation.has_challenge;
+    if (activation.has_message) {
+        activation_message_ = activation.message;
+    }
+    if (activation.has_code) {
+        activation_code_ = activation.code;
+    }
+    if (activation.has_challenge) {
+        activation_challenge_ = activation.challenge;
+    }
+    if (activation.has_timeout) {
+        activation_timeout_ms_ = activation.timeout_ms;
     }
 
     has_mqtt_config_ = false;
@@ -253,7 +247,6 @@ NetworkResult<> Ota::CheckVersion() {
         ESP_LOGW(TAG, "No firmware section found!");
     }
 
-    cJSON_Delete(root);
     return {};
 }
 

@@ -10,9 +10,9 @@ HTTP = r"""
 #define MOCK_HTTPS_CLIENT_H
 #include <stddef.h>
 #include <stdint.h>
-enum http_method { HTTP_GET };
+enum http_method { HTTP_GET, HTTP_POST };
 enum http_final_call { HTTP_DATA_MORE, HTTP_DATA_FINAL };
-struct http_response { unsigned http_status_code; int message_complete; };
+struct http_response { unsigned http_status_code; int message_complete; unsigned char* body_frag_start; size_t body_frag_len; };
 typedef void (*http_response_cb_t)(struct http_response*, enum http_final_call, void*);
 struct https_client_request {
     enum http_method method;
@@ -21,6 +21,9 @@ struct https_client_request {
     http_response_cb_t response;
     const char* ca_pem;
     size_t ca_len, buffer_size;
+    const char *content_type_value, *payload;
+    size_t payload_len;
+    int (*cancel)(void*);
 };
 int https_client_request(const struct https_client_request*, uint32_t, void*);
 #endif
@@ -83,7 +86,7 @@ int https_client_request(const struct https_client_request* req, uint32_t timeou
     assert(std::strcmp(req->header_fields[0], "Connection: close\r\n") == 0);
     if (mode == 4) return -1;
     if (mode == 8) return 0;
-    http_response response{200, 1};
+    http_response response{200, 1, nullptr, 0};
     if (mode == 5) response.message_complete = 0;
     if (mode == 6) response.http_status_code = 500;
     if (mode == 7) response.http_status_code = 301;

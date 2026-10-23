@@ -21,6 +21,8 @@ target_sources(app PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/../../main/device_state_machine.cc"
     "${CMAKE_CURRENT_LIST_DIR}/wifi_init.cc"
     "${CMAKE_CURRENT_LIST_DIR}/network_probe.cc"
+    "${CMAKE_CURRENT_LIST_DIR}/ota_check.cc"
+    "${CMAKE_CURRENT_LIST_DIR}/../../main/ota_check_response.cc"
     "${CMAKE_CURRENT_LIST_DIR}/network_time.c"
     "${CMAKE_CURRENT_LIST_DIR}/http_sdk_bridge.c"
     "${CMAKE_CURRENT_LIST_DIR}/wifi_sdk_bridge.c")

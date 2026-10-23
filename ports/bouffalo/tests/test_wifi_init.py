@@ -59,6 +59,7 @@ typedef struct {
     int timeout_ms;
 } wifi_mgmr_sta_connect_params_t;
 int wifi_mgmr_sta_autoconnect_disable(void);
+int wifi_mgmr_sta_mac_get(uint8_t mac[6]);
 int wifi_mgmr_sta_connect(const wifi_mgmr_sta_connect_params_t*);
 typedef struct { const char* text; } ip4_addr_t;
 typedef ip4_addr_t ip_addr_t;
@@ -103,6 +104,7 @@ struct TaskBlocked {};
 static int mode, driver_calls, manager_calls, creates, waits, connect_calls, disables, probes;
 static bool in_event_callback, monitor_delivered;
 bool RunNetworkProbe() { assert(!in_event_callback); ++probes; return true; }
+bool RunOtaCheck() { assert(!in_event_callback); return true; }
 static TickType_t ticks;
 static uint32_t pending;
 static async_event_cb listener;
@@ -149,6 +151,7 @@ BaseType_t xTaskCreate(void (*entry)(void*), const char*, unsigned, void* contex
     try { entry(context); } catch (const TaskBlocked&) {}
     return pdPASS;
 }
+int wifi_mgmr_sta_mac_get(uint8_t mac[6]) { (void)mac; return -1; }
 int wifi_mgmr_sta_autoconnect_disable() {
     assert(!in_event_callback);
     ++disables;

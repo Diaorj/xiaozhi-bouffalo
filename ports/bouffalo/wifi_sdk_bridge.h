@@ -1,6 +1,8 @@
 #ifndef XIAOZHI_BOUFFALO_WIFI_SDK_BRIDGE_H
 #define XIAOZHI_BOUFFALO_WIFI_SDK_BRIDGE_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -23,6 +25,8 @@ int WifiSdkStartDriver(void);
 int WifiSdkStartManager(void);
 // Submit one DHCP connection attempt with PMF optional and auto-reconnect disabled.
 int WifiSdkConnect(const char* ssid, const char* password);
+
+int WifiSdkGetStationMac(uint8_t mac[6]);
 
 #ifdef __cplusplus
 }

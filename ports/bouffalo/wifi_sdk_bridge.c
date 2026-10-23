@@ -96,3 +96,7 @@ int WifiSdkConnect(const char* ssid, const char* password) {
     const int result = wifi_mgmr_sta_autoconnect_disable();
     return result == 0 ? wifi_mgmr_sta_connect(&params) : result;
 }
+
+int WifiSdkGetStationMac(uint8_t mac[6]) {
+    return mac == NULL ? -1 : wifi_mgmr_sta_mac_get(mac);
+}
