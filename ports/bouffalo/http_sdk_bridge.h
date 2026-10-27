@@ -31,6 +31,9 @@ typedef struct {
 int HttpSdkVerifiedPostJson(const http_sdk_json_post_t* request, unsigned int timeout_ms,
                             char* body, size_t capacity, http_sdk_response_t* response);
 
+int HttpSdkVerifiedGetBody(const http_sdk_json_post_t* request, unsigned int timeout_ms,
+                           char* body, size_t capacity, http_sdk_response_t* response);
+
 #ifdef __cplusplus
 }
 #endif

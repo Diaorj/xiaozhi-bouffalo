@@ -2,26 +2,33 @@
 #include "ota_check_response.h"
 #include "system_info.h"
 #include "settings.h"
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+#include "ota_port_config.h"
+#else
 #include "assets/lang_config.h"
+#endif
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <cJSON.h>
 #include <esp_log.h>
+#ifndef XIAOZHI_PLATFORM_BOUFFALO
 #include <esp_partition.h>
 #include <esp_ota_ops.h>
 #include <esp_app_format.h>
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
 #include <esp_heap_caps.h>
+#endif
 #ifdef SOC_HMAC_SUPPORTED
 #include <esp_hmac.h>
 #endif
 
+#include <sys/time.h>
 #include <algorithm>
 #include <charconv>
 #include <cstring>
-#include <expected>
+
 #include <system_error>
 #include <vector>
 
@@ -66,7 +73,9 @@ std::string Ota::GetCheckVersionUrl() {
 std::unique_ptr<Http> Ota::SetupHttp() {
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
+    if (network == nullptr) return nullptr;
     auto http = network->CreateHttp(0);
+    if (http == nullptr) return nullptr;
     auto user_agent = SystemInfo::GetUserAgent();
     http->SetHeader("Activation-Version", has_serial_number_ ? "2" : "1");
     http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
@@ -87,19 +96,24 @@ std::unique_ptr<Http> Ota::SetupHttp() {
  */
 NetworkResult<> Ota::CheckVersion() {
     auto& board = Board::GetInstance();
-    auto app_desc = esp_app_get_description();
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+    const auto version = BouffaloApplicationVersion();
+#else
+    const auto version = std::string(esp_app_get_description()->version);
+#endif
 
     // Check if there is a new firmware version available
-    current_version_ = app_desc->version;
+    current_version_ = version;
     ESP_LOGI(TAG, "Current version: %s", current_version_.c_str());
 
     std::string url = GetCheckVersionUrl();
     if (url.length() < 10) {
         ESP_LOGE(TAG, "Check version URL is not properly set");
-        return std::unexpected(NetworkError::InvalidArgument());
+        return xiaozhi::Unexpected(NetworkError::InvalidArgument());
     }
 
     auto http = SetupHttp();
+    if (!http) return xiaozhi::Unexpected(NetworkError::NotInitialized());
 
     std::string data = board.GetSystemInfoJson();
     std::string method = data.length() > 0 ? "POST" : "GET";
@@ -113,11 +127,11 @@ NetworkResult<> Ota::CheckVersion() {
     auto status_code = http->GetStatusCode();
     if (!status_code) {
         ESP_LOGE(TAG, "Failed to read HTTP status: %s", status_code.error().ToString().c_str());
-        return std::unexpected(status_code.error());
+        return xiaozhi::Unexpected(status_code.error());
     }
     if (*status_code != 200) {
         ESP_LOGE(TAG, "Failed to check version, status code: %d", *status_code);
-        return std::unexpected(NetworkError::HttpFailed(*status_code));
+        return xiaozhi::Unexpected(NetworkError::HttpFailed(*status_code));
     }
 
     data = http->ReadAll();
@@ -130,7 +144,7 @@ NetworkResult<> Ota::CheckVersion() {
     OtaCheckResponse response;
     if (!response.Parse(data.data(), data.size())) {
         ESP_LOGE(TAG, "Failed to parse JSON response");
-        return std::unexpected(NetworkError::ProtocolError());
+        return xiaozhi::Unexpected(NetworkError::ProtocolError());
     }
 
     const cJSON* root = response.root();
@@ -199,19 +213,23 @@ NetworkResult<> Ota::CheckVersion() {
         cJSON *timezone_offset = cJSON_GetObjectItem(server_time, "timezone_offset");
         
         if (cJSON_IsNumber(timestamp)) {
-            // 设置系统时间
-            struct timeval tv;
-            double ts = timestamp->valuedouble;
-            
-            // 如果有时区偏移，计算本地时间
-            if (cJSON_IsNumber(timezone_offset)) {
-                ts += (timezone_offset->valueint * 60 * 1000); // 转换分钟为毫秒
+            const double ts = timestamp->valuedouble;
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+            (void)timezone_offset;  // SDK system clock remains UTC for TLS.
+            has_server_time_ = NetworkSetServerTime(ts) == 0;
+            if (!has_server_time_) {
+                return xiaozhi::Unexpected(NetworkError::ProtocolError());
             }
-            
-            tv.tv_sec = (time_t)(ts / 1000);  // 转换毫秒为秒
-            tv.tv_usec = (suseconds_t)((long long)ts % 1000) * 1000;  // 剩余的毫秒转换为微秒
-            settimeofday(&tv, NULL);
-            has_server_time_ = true;
+#else
+            struct timeval tv;
+            double local_ts = ts;
+            if (cJSON_IsNumber(timezone_offset)) {
+                local_ts += timezone_offset->valueint * 60 * 1000;
+            }
+            tv.tv_sec = (time_t)(local_ts / 1000);
+            tv.tv_usec = (suseconds_t)((long long)local_ts % 1000) * 1000;
+            has_server_time_ = settimeofday(&tv, NULL) == 0;
+#endif
         }
     } else {
         ESP_LOGW(TAG, "No server_time section found!");
@@ -250,6 +268,15 @@ NetworkResult<> Ota::CheckVersion() {
     return {};
 }
 
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+void Ota::MarkCurrentVersionValid() {
+    ESP_LOGW(TAG, "Firmware validation/rollback is not enabled on this port yet");
+}
+bool Ota::Upgrade(const std::string&, std::function<void(int, size_t)>) {
+    ESP_LOGE(TAG, "Firmware upgrade is not supported by this port yet");
+    return false;
+}
+#else
 void Ota::MarkCurrentVersionValid() {
     auto partition = esp_ota_get_running_partition();
     if (strcmp(partition->label, "factory") == 0) {
@@ -398,6 +425,8 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
     return true;
 }
 
+#endif
+
 bool Ota::StartUpgrade(std::function<void(int progress, size_t speed)> callback) {
     return Upgrade(firmware_url_, callback);
 }
@@ -406,7 +435,7 @@ bool Ota::StartUpgrade(std::function<void(int progress, size_t speed)> callback)
 // Versions are compared as dot-separated decimal numbers. Parsing must never throw: exceptions are
 // disabled in this project, so a malformed string from the server would otherwise terminate the
 // firmware instead of being reported as an error.
-std::expected<std::vector<int>, std::string> Ota::ParseVersion(const std::string& version) {
+xiaozhi::Expected<std::vector<int>, std::string> Ota::ParseVersion(const std::string& version) {
     std::vector<int> version_numbers;
     size_t start = 0;
 
@@ -418,7 +447,7 @@ std::expected<std::vector<int>, std::string> Ota::ParseVersion(const std::string
         int value = 0;
         auto [ptr, ec] = std::from_chars(segment.data(), segment.data() + segment.size(), value);
         if (segment.empty() || ec != std::errc() || ptr != segment.data() + segment.size()) {
-            return std::unexpected("invalid version segment \"" + segment + "\"");
+            return xiaozhi::Unexpected("invalid version segment \"" + segment + "\"");
         }
         version_numbers.push_back(value);
 
@@ -508,6 +537,7 @@ esp_err_t Ota::Activate() {
     }
 
     auto http = SetupHttp();
+    if (!http) return ESP_FAIL;
 
     std::string data = GetActivationPayload();
     http->SetContent(std::move(data));

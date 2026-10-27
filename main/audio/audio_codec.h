@@ -3,12 +3,14 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
+#ifndef XIAOZHI_PLATFORM_BOUFFALO
 #include <driver/i2s_std.h>
 #include <esp_idf_version.h>
+#endif
 
-#include <vector>
-#include <string>
 #include <functional>
+#include <string>
+#include <vector>
 
 #include "board.h"
 
@@ -18,17 +20,20 @@
 // ESP-IDF 6 removed i2s_port_t and changed i2s_chan_config_t::id to an integer.
 // Keep numeric I2S controller IDs usable on targets where IDF 5 does not expose
 // every value through the target-specific i2s_port_t enum (for example ESP32-C3).
+#if !defined(XIAOZHI_PLATFORM_BOUFFALO)
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
 #define XIAOZHI_I2S_PORT(port) (port)
 #else
 #define XIAOZHI_I2S_PORT(port) static_cast<i2s_port_t>(port)
 #endif
 
+#endif
+
 class AudioCodec {
 public:
     AudioCodec();
     virtual ~AudioCodec();
-    
+
     virtual void SetOutputVolume(int volume);
     virtual void SetInputGain(float gain);
     virtual void EnableInput(bool enable);
@@ -37,6 +42,9 @@ public:
     virtual void OutputData(std::vector<int16_t>& data);
     virtual bool InputData(std::vector<int16_t>& data);
     virtual void Start();
+    // Buffered output backends may still have DMA data after OutputData returns.
+    virtual bool FinishOutput() { return true; }
+    virtual bool OutputHealthy() const { return true; }
 
     inline bool duplex() const { return duplex_; }
     inline bool input_reference() const { return input_reference_; }
@@ -50,8 +58,10 @@ public:
     inline bool output_enabled() const { return output_enabled_; }
 
 protected:
+#ifndef XIAOZHI_PLATFORM_BOUFFALO
     i2s_chan_handle_t tx_handle_ = nullptr;
     i2s_chan_handle_t rx_handle_ = nullptr;
+#endif
 
     bool duplex_ = false;
     bool input_reference_ = false;
@@ -68,4 +78,4 @@ protected:
     virtual int Write(const int16_t* data, int samples) = 0;
 };
 
-#endif // _AUDIO_CODEC_H
+#endif  // _AUDIO_CODEC_H

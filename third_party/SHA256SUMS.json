@@ -1,0 +1,14 @@
+{
+  "esp-ml307/UPSTREAM.md": "0f7ed3d15db950cde9fdbc6e0866597aeb83a5d7bf6c99991bcbcf26433c9679",
+  "esp-ml307/LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+  "tl-expected/UPSTREAM.md": "f1bd9afcde1702a395300b85ebf79eb749f8c02568f36c233a1d0cd1d0e743da",
+  "tl-expected/COPYING": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+  "tl-expected/include/tl/expected.hpp": "5a6a46da2e46ee3360bd8fbd759affefc46b8bfd6295043262ec867acac1fa14",
+  "esp-ml307/include/udp.h": "f90953eeb8a8080fc3c8c6deb2fce3a0e347db4862d953948ebd3a463daae8e0",
+  "esp-ml307/include/network_error.h": "1bea76e3a97406ef1ea9e04d030057c668a1608b8af248b695b14435c57305ce",
+  "esp-ml307/include/http.h": "99ced0adbcac808e32c320bef648bbc760f0c4d72a7312778bd8a749ed3104d3",
+  "esp-ml307/include/network_interface.h": "591515c2062f739007f93d43e5cd6d05c40fd8d59c3ab79c5cad00c5d450c390",
+  "esp-ml307/include/web_socket.h": "07880946174351e967191f90b43a59964272aa064132cdfffda7e457205764a1",
+  "esp-ml307/include/tcp.h": "d81aee7b684debcce73211bf9dc90284301c2aaa3eaf6b676c534c6523847694",
+  "esp-ml307/include/mqtt.h": "29d844829b6aa293742bea82c7355ab30f49119a0386d30b4daa646a9099959e"
+}

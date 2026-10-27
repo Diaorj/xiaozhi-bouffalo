@@ -13,3 +13,11 @@
     LOG_RW("[W][%s] " format "\r\n", (tag), ##__VA_ARGS__)
 
 #endif  // XIAOZHI_BOUFFALO_ESP_LOG_H
+
+#ifndef ESP_LOGE
+#define ESP_LOGE(tag, format, ...) LOG_RE("[E][%s] " format "\r\n", tag, ##__VA_ARGS__)
+#endif
+
+#ifndef ESP_LOGD
+#define ESP_LOGD(tag, format, ...) ((void)0)
+#endif

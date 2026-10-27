@@ -1,6 +1,7 @@
 #include "wifi_init.h"
 #include "network_probe.h"
-#include "ota_check.h"
+#include "ota_bootstrap.h"
+#include "websocket_bootstrap.h"
 #include "wifi_sdk_bridge.h"
 
 #include <cstring>
@@ -214,7 +215,7 @@ void NetworkTask(void*) {
     const TaskHandle_t task = xTaskGetCurrentTaskHandle();
     if (InitializeNetwork(task) && ConnectHotspot(task)) {
         if (RunNetworkProbe()) {
-            RunOtaCheck();
+            if (RunOriginalOtaCheck()) RunOriginalWebsocketHandshake();
         }
     }
     // Callbacks retain this handle, including a possibly late lwIP init callback.

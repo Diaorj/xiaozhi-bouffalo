@@ -25,3 +25,15 @@ CONFIG_MBEDTLS_ECP_DP_SECP384R1_ENABLED=y
 
 # UUIDv5 device identifier; no cryptographic authentication is based on SHA-1.
 CONFIG_MBEDTLS_SHA1=y
+
+# SDK persistent configuration in the existing PSM partition.
+CONFIG_LITTLEFS=y
+CONFIG_BFLB_MTD=y
+CONFIG_PARTITION=y
+
+# Verified board: 4 MiB PSRAM, used for PCM buffering, never directly by DMA.
+CONFIG_PSRAM=y
+CONFIG_PSRAM_LENGTH=0x400000
+CONFIG_BSP_AUDIO_CODEC=y
+CONFIG_MULTIMEDIA=y
+CONFIG_OPUS=y

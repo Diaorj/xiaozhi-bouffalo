@@ -1,5 +1,9 @@
 #include "websocket_protocol.h"
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+#include "websocket_port_config.h"
+#else
 #include "application.h"
+#endif
 #include "board.h"
 #include "settings.h"
 #include "system_info.h"
@@ -8,13 +12,19 @@
 #include <arpa/inet.h>
 #include <cJSON.h>
 #include <cstring>
+#ifndef XIAOZHI_PLATFORM_BOUFFALO
 #include "assets/lang_config.h"
+#endif
 
 #define TAG "WS"
 
 WebsocketProtocol::WebsocketProtocol() { event_group_handle_ = xEventGroupCreate(); }
 
-WebsocketProtocol::~WebsocketProtocol() { vEventGroupDelete(event_group_handle_); }
+WebsocketProtocol::~WebsocketProtocol() {
+    // Join transport callbacks before destroying the event group they signal.
+    websocket_.reset();
+    if (event_group_handle_) vEventGroupDelete(event_group_handle_);
+}
 
 bool WebsocketProtocol::Start() {
     // Only connect to server when audio channel is needed
@@ -85,7 +95,20 @@ bool WebsocketProtocol::OpenAudioChannel() {
         version_ = version;
     }
 
+    if (!event_group_handle_) return false;
+    websocket_.reset();
+    xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
+    session_id_.clear();
     error_occurred_ = false;
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+    // Credentials come from OTA; only verified WSS is supported by this port.
+    std::string host, port, path;
+    if (!ParseSecureWebsocketUri(url.c_str(), host, port, path) || version_ < 1 || version_ > 3 ||
+        token.size() > 2048 || token.find_first_of("\r\n") != std::string::npos) {
+        ESP_LOGE(TAG, "Invalid persisted WebSocket configuration");
+        return false;
+    }
+#endif
 
     auto network = Board::GetInstance().GetNetwork();
     websocket_ = network->CreateWebSocket(1);
@@ -106,30 +129,26 @@ bool WebsocketProtocol::OpenAudioChannel() {
     websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
 
     websocket_->OnData([this](const char* data, size_t len, bool binary) {
+        // Publish the receive time before hello signals the waiting owner task.
+        last_incoming_time_ = std::chrono::steady_clock::now();
         if (binary) {
             if (on_incoming_audio_ != nullptr) {
-                if (version_ == 2) {
-                    BinaryProtocol2* bp2 = (BinaryProtocol2*)data;
-                    bp2->version = ntohs(bp2->version);
-                    bp2->type = ntohs(bp2->type);
-                    bp2->timestamp = ntohl(bp2->timestamp);
-                    bp2->payload_size = ntohl(bp2->payload_size);
-                    auto payload = (uint8_t*)bp2->payload;
+                if (version_ == 2 || version_ == 3) {
+                    const size_t header_size=version_==2?sizeof(BinaryProtocol2):sizeof(BinaryProtocol3);
+                    if(len<header_size) {SetError("Invalid audio header");return;}
+                    uint32_t payload_size=0,timestamp=0;
+                    if(version_==2) {
+                        BinaryProtocol2 header;std::memcpy(&header,data,sizeof(header));
+                        payload_size=ntohl(header.payload_size);timestamp=ntohl(header.timestamp);
+                    } else {
+                        BinaryProtocol3 header;std::memcpy(&header,data,sizeof(header));
+                        payload_size=ntohs(header.payload_size);
+                    }
+                    if(payload_size!=len-header_size) {SetError("Invalid audio payload length");return;}
+                    const auto payload=reinterpret_cast<const uint8_t*>(data)+header_size;
                     on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = bp2->timestamp,
-                        .payload = std::vector<uint8_t>(payload, payload + bp2->payload_size)}));
-                } else if (version_ == 3) {
-                    BinaryProtocol3* bp3 = (BinaryProtocol3*)data;
-                    bp3->type = bp3->type;
-                    bp3->payload_size = ntohs(bp3->payload_size);
-                    auto payload = (uint8_t*)bp3->payload;
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = 0,
-                        .payload = std::vector<uint8_t>(payload, payload + bp3->payload_size)}));
+                        .sample_rate=server_sample_rate_,.frame_duration=server_frame_duration_,
+                        .timestamp=timestamp,.payload=std::vector<uint8_t>(payload,payload+payload_size)}));
                 } else {
                     on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
@@ -155,7 +174,6 @@ bool WebsocketProtocol::OpenAudioChannel() {
             }
             cJSON_Delete(root);
         }
-        last_incoming_time_ = std::chrono::steady_clock::now();
     });
 
     websocket_->OnDisconnected([this]() {
@@ -165,11 +183,19 @@ bool WebsocketProtocol::OpenAudioChannel() {
         }
     });
 
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+    ESP_LOGI(TAG, "ORIGINAL_WS_BEGIN: %s:%s; version=%d", host.c_str(), port.c_str(), version_);
+#else
     ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
+#endif
     if (auto connected = websocket_->Connect(url.c_str()); !connected) {
         ESP_LOGE(TAG, "Failed to connect to websocket server: %s",
                  connected.error().ToString().c_str());
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+#else
         SetError(Lang::Strings::SERVER_NOT_CONNECTED, url);
+#endif
         return false;
     }
 
@@ -183,7 +209,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
     EventBits_t bits =
         xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE,
                             pdFALSE, pdMS_TO_TICKS(10000));
-    if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
+    if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT) || !websocket_->IsConnected()) {
         ESP_LOGE(TAG, "Failed to receive server hello");
         SetError(Lang::Strings::SERVER_TIMEOUT);
         return false;
@@ -202,10 +228,14 @@ std::string WebsocketProtocol::GetHelloMessage() {
     cJSON_AddStringToObject(root, "type", "hello");
     cJSON_AddNumberToObject(root, "version", version_);
     cJSON* features = cJSON_CreateObject();
-#if CONFIG_USE_SERVER_AEC
+#if defined(CONFIG_USE_SERVER_AEC) && CONFIG_USE_SERVER_AEC
     cJSON_AddBoolToObject(features, "aec", true);
 #endif
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+    cJSON_AddBoolToObject(features, "mcp", false);
+#else
     cJSON_AddBoolToObject(features, "mcp", true);
+#endif
     cJSON_AddItemToObject(root, "features", features);
     AddTextFontCapabilities(root);
     cJSON_AddStringToObject(root, "transport", "websocket");
@@ -236,7 +266,11 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root) {
     auto session_id = cJSON_GetObjectItem(root, "session_id");
     if (cJSON_IsString(session_id)) {
         session_id_ = session_id->valuestring;
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+        ESP_LOGI(TAG, "Server hello received; session established");
+#else
         ESP_LOGI(TAG, "Session ID: %s", session_id_.c_str());
+#endif
     }
 
     auto audio_params = cJSON_GetObjectItem(root, "audio_params");

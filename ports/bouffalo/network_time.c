@@ -146,3 +146,14 @@ int NetworkPrepareTime(void)
     LOG_E("TIME_SYNC_FAILED: no valid clock; HTTPS check skipped\r\n");
     return -1;
 }
+
+int NetworkSetServerTime(double timestamp_ms)
+{
+    struct timeval tv = {0};
+    if (!(timestamp_ms >= NETWORK_TIME_MIN * 1000.0 && timestamp_ms <= NETWORK_TIME_MAX * 1000.0)) {
+        return -1;
+    }
+    tv.tv_sec = (time_t)(timestamp_ms / 1000.0);
+    tv.tv_usec = (long long)timestamp_ms % 1000 * 1000;
+    return settimeofday(&tv, NULL);
+}

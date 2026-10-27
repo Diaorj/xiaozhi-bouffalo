@@ -1,11 +1,18 @@
 #include "protocol.h"
+#ifndef XIAOZHI_PLATFORM_BOUFFALO
 #include "assets.h"
+#endif
 
 #include <esp_log.h>
 
 #define TAG "Protocol"
 
 void Protocol::AddTextFontCapabilities(cJSON* root) {
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+    // No display/assets backend has been ported yet.
+    auto features = cJSON_GetObjectItem(root, "features");
+    if (cJSON_IsObject(features)) cJSON_AddBoolToObject(features, "glyph_push", false);
+#else
     auto capability = Assets::GetInstance().text_font_capability();
     cJSON* features = cJSON_GetObjectItem(root, "features");
     if (cJSON_IsObject(features)) {
@@ -21,6 +28,7 @@ void Protocol::AddTextFontCapabilities(cJSON* root) {
     cJSON_AddNumberToObject(font, "size", capability.size);
     cJSON_AddNumberToObject(font, "bpp", capability.bpp);
     cJSON_AddItemToObject(root, "text_font", font);
+#endif
 }
 
 void Protocol::OnIncomingJson(std::function<void(const cJSON* root)> callback) {

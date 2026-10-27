@@ -104,7 +104,8 @@ struct TaskBlocked {};
 static int mode, driver_calls, manager_calls, creates, waits, connect_calls, disables, probes;
 static bool in_event_callback, monitor_delivered;
 bool RunNetworkProbe() { assert(!in_event_callback); ++probes; return true; }
-bool RunOtaCheck() { assert(!in_event_callback); return true; }
+bool RunOriginalWebsocketHandshake() { return true; }
+bool RunOriginalOtaCheck() { assert(!in_event_callback); return true; }
 static TickType_t ticks;
 static uint32_t pending;
 static async_event_cb listener;

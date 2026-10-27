@@ -9,10 +9,17 @@
 #include <functional>
 #include <network_interface.h>
 
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+class Led;
+class Backlight;
+class Camera;
+#else
 #include "led/led.h"
 #include "backlight.h"
 #include "camera.h"
 #include "assets.h"
+
+#endif
 
 /**
  * Network events for unified callback

@@ -98,3 +98,20 @@ int HttpSdkVerifiedPostJson(const http_sdk_json_post_t* input, unsigned int time
     const int result = https_client_request(&request, timeout_ms, &context);
     return response->overflow ? -1 : result;
 }
+
+int HttpSdkVerifiedGetBody(const http_sdk_json_post_t* input, unsigned int timeout_ms,
+                           char* body, size_t capacity, http_sdk_response_t* response) {
+    if (response == NULL) return -1;
+    memset(response, 0, sizeof(*response));
+    if (input == NULL || input->url == NULL || strncmp(input->url, "https://", 8) != 0 ||
+        input->ca_pem == NULL || input->ca_len == 0 || timeout_ms == 0 || body == NULL || capacity < 2) return -1;
+    body[0] = '\0';
+    post_context_t context = {response, body, capacity};
+    struct https_client_request request = {0};
+    request.method = HTTP_GET; request.url = input->url; request.protocol = "HTTP/1.1";
+    request.header_fields = input->headers; request.response = OnJsonResponse;
+    request.cancel = CancelOversizedResponse; request.ca_pem = input->ca_pem;
+    request.ca_len = input->ca_len; request.buffer_size = 1024;
+    const int result = https_client_request(&request, timeout_ms, &context);
+    return response->overflow ? -1 : result;
+}

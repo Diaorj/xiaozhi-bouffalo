@@ -3,6 +3,8 @@
 
 #include <cJSON.h>
 #include <chrono>
+#include <cstdint>
+#include <memory>
 #include <functional>
 #include <string>
 #include <vector>

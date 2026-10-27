@@ -12,6 +12,8 @@ extern "C" {
 #endif
 // Blocking normal-task API. Returns 0 when certificate date checks can use the clock.
 int NetworkPrepareTime(void);
+int NetworkSetServerTime(double timestamp_ms);
+
 #ifdef __cplusplus
 }
 #endif

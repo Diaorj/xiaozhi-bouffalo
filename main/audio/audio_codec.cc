@@ -4,7 +4,9 @@
 
 #include <esp_log.h>
 #include <cstring>
+#ifndef XIAOZHI_PLATFORM_BOUFFALO
 #include <driver/i2s_common.h>
+#endif
 
 #define TAG "AudioCodec"
 

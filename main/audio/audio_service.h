@@ -3,26 +3,35 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <memory>
 #include <mutex>
+#include "platform/condition_variable.h"
 
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
 #include <esp_timer.h>
+#endif
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <freertos/task.h>
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
 #include <model_path.h>
 #include "esp_ae_rate_cvt.h"
 #include "esp_audio_enc.h"
 #include "esp_audio_types.h"
 #include "esp_opus_dec.h"
 #include "esp_opus_enc.h"
+#endif
 
 #include "audio_codec.h"
+#include "audio_decoder.h"
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
 #include "audio_debugger.h"
 #include "audio_engine.h"
+#endif
 #include "fixed_queue.h"
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
 #include "ogg_demuxer.h"
+#endif
 #include "protocol.h"
 
 /*
@@ -40,7 +49,11 @@
 #define OPUS_FRAME_DURATION_MS 60
 #define MAX_ENCODE_TASKS_IN_QUEUE 2
 #define MAX_PLAYBACK_TASKS_IN_QUEUE 2
+#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#define MAX_DECODE_PACKETS_IN_QUEUE 128
+#else
 #define MAX_DECODE_PACKETS_IN_QUEUE (1200 / OPUS_FRAME_DURATION_MS)
+#endif
 #define MAX_SEND_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
 #define AUDIO_TESTING_MAX_DURATION_MS 10000
 #define MAX_TIMESTAMPS_IN_QUEUE 3
@@ -53,6 +66,7 @@
 #define AS_EVENT_AUDIO_PROCESSOR_RUNNING (1 << 2)
 #define AS_EVENT_AUDIO_INPUT_STOP_REQUEST (1 << 4)
 
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
 #define AS_OPUS_GET_FRAME_DRU_ENUM(duration_ms)                  \
     ((duration_ms) == 5     ? ESP_OPUS_ENC_FRAME_DURATION_5_MS   \
      : (duration_ms) == 10  ? ESP_OPUS_ENC_FRAME_DURATION_10_MS  \
@@ -78,6 +92,8 @@
         .enable_dtx = true,                                                                    \
         .enable_vbr = true,                                                                    \
     }
+
+#endif
 
 struct AudioServiceCallbacks {
     std::function<void(void)> on_send_queue_available;
@@ -116,15 +132,25 @@ public:
     AudioService();
     ~AudioService();
 
-    void Initialize(AudioCodec* codec);
+    void Initialize(AudioCodec* codec, std::unique_ptr<AudioDecoder> decoder = nullptr);
     void Start();
     void Stop();
+    bool IsRunning() const { return !service_stopped_.load(); }
+#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+    bool HasPlaybackError() const { return playback_failed_.load(); }
+    // Control-task only: call after TTS stop AND IsPlaybackIdle(). Drains hardware too.
+    bool FinishPlayback();
+#endif
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
     void EncodeWakeWord();
     std::unique_ptr<AudioStreamPacket> PopWakeWordPacket();
     const std::string& GetLastWakeWord() const;
     bool IsVoiceDetected() const { return voice_detected_; }
+#endif
     bool IsIdle();
     bool IsPlaybackIdle();
+
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
     bool IsWakeWordRunning() const {
         return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING;
     }
@@ -139,26 +165,38 @@ public:
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
 
+#endif
+
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
+#endif
     void ResetDecoder();
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
     void SetModelsList(srmodel_list_t* models_list);
+#endif
 
 private:
     AudioCodec* codec_ = nullptr;
     AudioServiceCallbacks callbacks_;
+    std::unique_ptr<AudioDecoder> platform_decoder_;
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
     std::unique_ptr<AudioEngine> audio_engine_;
     std::unique_ptr<AudioDebugger> audio_debugger_;
     void* opus_encoder_ = nullptr;
     void* opus_decoder_ = nullptr;
+#endif
     std::mutex decoder_mutex_;
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
     std::mutex input_resampler_mutex_;
     esp_ae_rate_cvt_handle_t input_resampler_ = nullptr;
     esp_ae_rate_cvt_handle_t output_resampler_ = nullptr;
+
+#endif
 
     // Encoder/Decoder state
     int encoder_sample_rate_ = 16000;
@@ -170,7 +208,9 @@ private:
     int decoder_frame_size_ = 0;
     DebugStatistics debug_statistics_;
     int64_t last_encode_drop_log_time_ = 0;
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
     srmodel_list_t* models_list_ = nullptr;
+#endif
 
     EventGroupHandle_t event_group_;
 
@@ -179,7 +219,7 @@ private:
     TaskHandle_t audio_output_task_handle_ = nullptr;
     TaskHandle_t opus_codec_task_handle_ = nullptr;
     std::mutex audio_queue_mutex_;
-    std::condition_variable audio_queue_cv_;
+    xiaozhi::ConditionVariable audio_queue_cv_;
     // Testing records up to AUDIO_TESTING_MAX_DURATION_MS, then swaps into the
     // decode queue. Both queues must share this capacity so swap() is valid.
     static constexpr size_t kAudioTestingPacketCapacity =
@@ -190,6 +230,12 @@ private:
         audio_testing_queue_;
     FixedQueue<AudioTask, MAX_ENCODE_TASKS_IN_QUEUE> audio_encode_queue_;
     FixedQueue<AudioTask, MAX_PLAYBACK_TASKS_IN_QUEUE> audio_playback_queue_;
+#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+    // The receiver never waits for the speaker: bound both packets and payload bytes.
+    size_t decode_queue_bytes_ = 0;
+    bool playback_accepting_ = false;
+    std::atomic<bool> playback_failed_{false};
+#endif
     bool decode_in_flight_ = false;
     bool output_in_flight_ = false;
     bool playback_drained_notified_ = true;
@@ -199,7 +245,7 @@ private:
 
     bool audio_engine_initialized_ = false;
     bool voice_detected_ = false;
-#if CONFIG_USE_DEVICE_AEC
+#if defined(CONFIG_USE_DEVICE_AEC) && CONFIG_USE_DEVICE_AEC
     bool device_aec_enabled_ = true;
 #else
     bool device_aec_enabled_ = false;
@@ -207,17 +253,23 @@ private:
     std::atomic<bool> service_stopped_{true};
     std::atomic<bool> audio_input_need_warmup_{false};
 
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
     esp_timer_handle_t audio_power_timer_ = nullptr;
+#endif
     std::chrono::steady_clock::time_point last_input_time_;
     std::chrono::steady_clock::time_point last_output_time_;
 
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
     void AudioInputTask();
+#endif
     void AudioOutputTask();
     void OpusCodecTask();
+#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
     bool InitializeAudioEngine();
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckAndUpdateAudioPowerState();
+#endif
     bool IsPlaybackDrainedLocked() const;
     bool MarkPlaybackDrainedLocked();
 };
