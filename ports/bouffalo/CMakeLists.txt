@@ -25,6 +25,8 @@ target_sources(app PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/websocket_bootstrap.cc"
     "${CMAKE_CURRENT_LIST_DIR}/../../main/audio/audio_service.cc"
     "${CMAKE_CURRENT_LIST_DIR}/opus_decoder_bouffalo.cc"
+    "${CMAKE_CURRENT_LIST_DIR}/opus_encoder_bouffalo.cc"
+    "${CMAKE_CURRENT_LIST_DIR}/voice_input.cc"
     "${CMAKE_CURRENT_LIST_DIR}/audio_codec_bouffalo.cc"
     "${CMAKE_CURRENT_LIST_DIR}/audio_sdk_bridge.c"
     "${CMAKE_CURRENT_LIST_DIR}/speaker_worker.c"
@@ -73,6 +75,12 @@ set_target_properties(app ${CMAKE_PROJECT_NAME}.elf PROPERTIES
 target_include_directories(app PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../../main")
 target_include_directories(${CMAKE_PROJECT_NAME}.elf PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../../main")
 
+option(XIAOZHI_VOICE_INPUT_TEST "Capture and upload one spoken question at boot" ON)
+foreach(target app ${CMAKE_PROJECT_NAME}.elf)
+    target_compile_definitions(${target} PRIVATE
+        XIAOZHI_VOICE_INPUT_TEST=$<BOOL:${XIAOZHI_VOICE_INPUT_TEST}>)
+endforeach()
+
 # This firmware always has a pthread backend. GCC 10's weak gthread probe uses
 # pthread_cancel, which the SDK does not implement, and would skip mutex calls.
 foreach(target app ${CMAKE_PROJECT_NAME}.elf)
@@ -98,7 +106,7 @@ foreach(header IN LISTS network_headers)
     file(WRITE "${network_include}/${name}" "${content}")
 endforeach()
 foreach(target app ${CMAKE_PROJECT_NAME}.elf)
-    target_compile_definitions(${target} PRIVATE XIAOZHI_PLATFORM_BOUFFALO=1 XIAOZHI_AUDIO_PLAYBACK_ONLY=1)
+    target_compile_definitions(${target} PRIVATE XIAOZHI_PLATFORM_BOUFFALO=1 XIAOZHI_AUDIO_PLATFORM_BACKEND=1)
     target_include_directories(${target} PRIVATE "${network_include}"
         "${CMAKE_CURRENT_LIST_DIR}/../../main/boards/common"
         "${CMAKE_CURRENT_LIST_DIR}/../../main/protocols"

@@ -6,13 +6,15 @@ BouffaloAudioCodec::BouffaloAudioCodec() {
     output_volume_ = 15;
 }
 void BouffaloAudioCodec::Start() {
-    // Playback-only stage: do not load/write persistent volume or enable ADC.
-    ESP_LOGI("AudioCodec", "BL616CL_ES8388_READY: playback only, volume=%d", output_volume_);
+    // Hardware opens on demand; capture and playback are mutually exclusive.
+    ESP_LOGI("AudioCodec", "BL616CL_ES8388_READY: half duplex, volume=%d", output_volume_);
 }
 void BouffaloAudioCodec::EnableOutput(bool enable) {
     if (enable == output_enabled_)
         return;
     if (enable) {
+        if (input_enabled_)
+            return;
         healthy_ = AudioSdkOpen(output_volume_) == 0;
         output_enabled_ = healthy_;
     } else
@@ -38,4 +40,21 @@ void BouffaloAudioCodec::Abort() {
     if (output_enabled_)
         AudioSdkAbort();
     output_enabled_ = false;
+}
+
+void BouffaloAudioCodec::EnableInput(bool enable) {
+    if (enable == input_enabled_)
+        return;
+    if (enable) {
+        if (!output_enabled_)
+            input_enabled_ = AudioSdkRecordOpen() == 0;
+    } else {
+        AudioSdkRecordClose();
+        input_enabled_ = false;
+    }
+}
+int BouffaloAudioCodec::Read(int16_t* pcm, int frames) {
+    if (!input_enabled_ || frames <= 0)
+        return -1;
+    return AudioSdkRead(pcm, frames);
 }

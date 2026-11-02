@@ -67,6 +67,9 @@ extern "C" int AudioSdkWrite(const int16_t* pcm,size_t n) {
 }
 extern "C" int AudioSdkFinish() { ++finished_audio;return test_case==9?-1:0; }
 extern "C" void AudioSdkAbort() { ++abort_audio; }
+extern "C" int AudioSdkRecordOpen() { return -1; }
+extern "C" int AudioSdkRead(int16_t*,size_t) { return -1; }
+extern "C" void AudioSdkRecordClose() {}
 """+t[i:]
             t=t.replace('static int mode, live_tls, requests, hello_count;', 'static int mode, live_tls, requests;')
             t=t.replace('int xTaskCreate(void(*fn)(void*),const char*,unsigned,void* p,unsigned,void* out) {', r"""int xTaskCreate(void(*fn)(void*),const char* name,unsigned,void* p,unsigned,void* out) {
@@ -195,11 +198,33 @@ int main(int argc,char** argv) {
     puts("FULL_AUDIO_TEST_OK");
 }
 """
+            voice_tests=getattr(self,'voice_input_tests',False)
+            if voice_tests:
+                from voice_input_harness import customize
+                t=customize(t)
             (work/'check.cc').write_text(t)
             subprocess.run(['gcc','-std=c99','-c',str(CJSON/'cJSON.c'),'-o',str(work/'json.o')],check=True)
             include=[work,work/'interfaces',PORT,PORT/'compat',ROOT/'main',ROOT/'main/boards/common',ROOT/'main/protocols',ROOT/'third_party/tl-expected/include',CJSON,opus/'include']
             sources=[ROOT/'main/protocols/protocol.cc',ROOT/'main/protocols/websocket_protocol.cc',ROOT/'main/audio/audio_codec.cc',ROOT/'main/audio/audio_service.cc',*[PORT/x for x in ['tcp_bouffalo.cc','websocket_support.cc','opus_decoder_bouffalo.cc','audio_codec_bouffalo.cc','websocket_bootstrap.cc']],work/'web_socket.cc',work/'check.cc',work/'json.o',work/'build/libhost_opus.a']
-            subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-pthread','-DXIAOZHI_PLATFORM_BOUFFALO=1','-DXIAOZHI_AUDIO_PLAYBACK_ONLY=1',*['-I'+str(x) for x in include],*[str(x) for x in sources],'-lm','-o',str(work/'check')],check=True)
+            extra=[]
+            if voice_tests:
+                sources[0:0]=[PORT/'voice_input.cc',PORT/'opus_encoder_bouffalo.cc']
+                extra=['-DXIAOZHI_VOICE_INPUT_TEST=1']
+            subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-pthread','-DXIAOZHI_PLATFORM_BOUFFALO=1','-DXIAOZHI_AUDIO_PLATFORM_BACKEND=1',*extra,*['-I'+str(x) for x in include],*[str(x) for x in sources],'-lm','-o',str(work/'check')],check=True)
+            if voice_tests:
+                for case in [0,3,20,21,22,23,24,25]:
+                    with self.subTest(case=case):
+                        result=subprocess.run([str(work/'check'),str(case)],capture_output=True,text=True,timeout=25)
+                        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                        self.assertIn('VOICE_TEST_OK',result.stdout)
+                        if case in (0,3,25):
+                            self.assertIn('VOICE_ENCODE_DONE: packets=84',result.stdout)
+                            self.assertIn('WS_SESSION_RELEASED:',result.stdout)
+                        if case==0:
+                            self.assertIn('VOICE_UPLOADED:',result.stdout)
+                            self.assertIn('RECOGNIZED: test utterance',result.stdout)
+                            self.assertIn('AUDIO_REPLY_DONE:',result.stdout)
+                return
             for case in range(18):
                 with self.subTest(case=case):
                     result=subprocess.run([str(work/'check'),str(case)],capture_output=True,text=True,timeout=40 if case==14 else 25)

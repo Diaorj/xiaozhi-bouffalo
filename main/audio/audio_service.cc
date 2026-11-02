@@ -2,7 +2,7 @@
 #include <esp_log.h>
 #include <cstring>
 
-#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifndef XIAOZHI_AUDIO_PLATFORM_BACKEND
 #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)                                        \
     (esp_ae_rate_cvt_cfg_t) {                                                                \
         .src_rate = (uint32_t)(_src_rate), .dest_rate = (uint32_t)(_dest_rate),              \
@@ -28,7 +28,7 @@
 
 #define TAG "AudioService"
 
-#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
 static constexpr EventBits_t kOutputStopped = 1U << 5;
 static constexpr EventBits_t kDecoderStopped = 1U << 6;
 #endif
@@ -36,13 +36,13 @@ static constexpr EventBits_t kDecoderStopped = 1U << 6;
 AudioService::AudioService() { event_group_ = xEventGroupCreate(); }
 
 AudioService::~AudioService() {
-#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
     Stop();
 #endif
     if (event_group_ != nullptr) {
         vEventGroupDelete(event_group_);
     }
-#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifndef XIAOZHI_AUDIO_PLATFORM_BACKEND
     if (opus_encoder_ != nullptr) {
         esp_opus_enc_close(opus_encoder_);
     }
@@ -63,7 +63,7 @@ void AudioService::Initialize(AudioCodec* codec, std::unique_ptr<AudioDecoder> d
     platform_decoder_ = std::move(decoder);
     if (codec_)
         codec_->Start();
-#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifndef XIAOZHI_AUDIO_PLATFORM_BACKEND
 
     esp_opus_dec_cfg_t opus_dec_cfg =
         OPUS_DEC_CFG(codec->output_sample_rate(), OPUS_FRAME_DURATION_MS);
@@ -132,11 +132,12 @@ void AudioService::Initialize(AudioCodec* codec, std::unique_ptr<AudioDecoder> d
 }
 
 void AudioService::Start() {
-#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
     if (!service_stopped_.load() || !codec_ || !platform_decoder_ || !event_group_)
         return;
     platform_decoder_->Reset();
     debug_statistics_ = {};
+    encoding_failed_ = false;
     playback_failed_ = false;
     playback_accepting_ = true;
     service_stopped_ = false;
@@ -224,13 +225,59 @@ void AudioService::Start() {
 #endif
 }
 
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
+bool AudioService::StartEncoding(std::unique_ptr<AudioEncoder> encoder) {
+    if (!service_stopped_ || !codec_ || !event_group_ || !encoder)
+        return false;
+    platform_encoder_ = std::move(encoder);
+    encoding_failed_ = false;
+    playback_accepting_ = false;
+    service_stopped_ = false;
+    xEventGroupClearBits(event_group_, kDecoderStopped);
+    // SDK Opus uses variable-length stack workspaces. This larger stack exists
+    // only during pre-encoding, before TLS and playback tasks are created.
+    if (xTaskCreate(
+            [](void* arg) {
+                auto* self = static_cast<AudioService*>(arg);
+                self->OpusCodecTask();
+                xEventGroupSetBits(self->event_group_, kDecoderStopped);
+                vTaskDelete(nullptr);
+            },
+            "opus_encode", 12288, this, 6, &opus_codec_task_handle_) != pdPASS) {
+        opus_codec_task_handle_ = nullptr;
+        Stop();
+        return false;
+    }
+    ESP_LOGI(TAG, "AUDIO_ENCODER_READY: original encode/send queues; stack=49152 bytes");
+    return true;
+}
+
+bool AudioService::PushPcmToEncodeQueue(std::vector<int16_t>&& pcm) {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    if (service_stopped_ || encoding_failed_ || !platform_encoder_ ||
+        pcm.size() != platform_encoder_->FrameSamples() || audio_encode_queue_.full())
+        return false;
+    AudioTask task;
+    task.type = kAudioTaskTypeEncodeToSendQueue;
+    task.pcm = std::move(pcm);
+    audio_encode_queue_.push_back(std::move(task));
+    audio_queue_cv_.notify_all();
+    return true;
+}
+
+bool AudioService::IsEncodingIdle() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    return audio_encode_queue_.empty() && !encode_in_flight_;
+}
+#endif
+
 void AudioService::Stop() {
-#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
     if (!event_group_ ||
         (service_stopped_ && !audio_output_task_handle_ && !opus_codec_task_handle_))
         return;
 #endif
-#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifndef XIAOZHI_AUDIO_PLATFORM_BACKEND
     esp_timer_stop(audio_power_timer_);
 #endif
     service_stopped_.store(true);
@@ -241,7 +288,7 @@ void AudioService::Stop() {
     {
         std::lock_guard<std::mutex> lock(audio_queue_mutex_);
         ++playback_generation_;
-#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
         playback_accepting_ = false;
         decode_queue_bytes_ = 0;
 #endif
@@ -249,13 +296,16 @@ void AudioService::Stop() {
         audio_decode_queue_.clear();
         audio_playback_queue_.clear();
         audio_testing_queue_.clear();
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
+        audio_send_queue_.clear();
+#endif
         notify_drained = MarkPlaybackDrainedLocked();
         audio_queue_cv_.notify_all();
     }
     if (notify_drained && callbacks_.on_playback_drained) {
         callbacks_.on_playback_drained();
     }
-#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
     // Control task only. Never free the decoder/codec while either worker uses it.
     EventBits_t stopped = (audio_output_task_handle_ ? kOutputStopped : 0) |
                           (opus_codec_task_handle_ ? kDecoderStopped : 0);
@@ -263,12 +313,20 @@ void AudioService::Stop() {
         xEventGroupWaitBits(event_group_, stopped, pdFALSE, pdTRUE, portMAX_DELAY);
     audio_output_task_handle_ = nullptr;
     opus_codec_task_handle_ = nullptr;
-    if (codec_)
+    platform_encoder_.reset();
+    {
+        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+        audio_send_queue_.clear();
+        encode_in_flight_ = false;
+    }
+    if (codec_) {
+        codec_->EnableInput(false);
         codec_->EnableOutput(false);
+    }
 #endif
 }
 
-#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifndef XIAOZHI_AUDIO_PLATFORM_BACKEND
 bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples) {
     if (!codec_->input_enabled()) {
         esp_timer_stop(audio_power_timer_);
@@ -418,7 +476,7 @@ void AudioService::AudioOutputTask() {
         lock.unlock();
 
         if (!codec_->output_enabled()) {
-#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifndef XIAOZHI_AUDIO_PLATFORM_BACKEND
             esp_timer_stop(audio_power_timer_);
             esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
 #endif
@@ -429,7 +487,7 @@ void AudioService::AudioOutputTask() {
             callbacks_.on_playback_progress(task.playback_id, task.media_position_ms);
         }
 
-#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
         if (codec_->OutputHealthy())
             codec_->OutputData(task.pcm);
         if (!codec_->OutputHealthy())
@@ -483,7 +541,7 @@ void AudioService::OpusCodecTask() {
             audio_playback_queue_.size() < MAX_PLAYBACK_TASKS_IN_QUEUE) {
             auto packet = std::move(audio_decode_queue_.front());
             audio_decode_queue_.pop_front();
-#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
             decode_queue_bytes_ -= packet->payload.size();
 #endif
             decode_in_flight_ = true;
@@ -502,7 +560,7 @@ void AudioService::OpusCodecTask() {
                 std::lock_guard<std::mutex> decoder_lock(decoder_mutex_);
                 decoded = platform_decoder_->Decode(*packet, task.pcm);
             }
-#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifndef XIAOZHI_AUDIO_PLATFORM_BACKEND
             else {
                 SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
                 if (opus_decoder_ != nullptr) {
@@ -546,7 +604,7 @@ void AudioService::OpusCodecTask() {
                 }
             }
 #endif
-#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
             if (!decoded) {
                 ESP_LOGE(TAG, "OPUS_DECODE_FAILED: invalid packet or decoder error");
                 playback_failed_ = true;
@@ -569,11 +627,13 @@ void AudioService::OpusCodecTask() {
             }
             lock.lock();
         }
-#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
         /* Encode the audio to send queue */
         if (!audio_encode_queue_.empty()) {
             auto task = std::move(audio_encode_queue_.front());
             audio_encode_queue_.pop_front();
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
+            encode_in_flight_ = true;
+#endif
             audio_queue_cv_.notify_all();
             lock.unlock();
 
@@ -582,6 +642,12 @@ void AudioService::OpusCodecTask() {
             packet->sample_rate = 16000;
             packet->timestamp = task.timestamp;
 
+            bool encoded = false;
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
+            encoded = platform_encoder_ && platform_encoder_->Encode(task.pcm, packet->payload);
+            if (!encoded)
+                encoding_failed_ = true;
+#else
             if (opus_encoder_ != nullptr && task.pcm.size() == encoder_frame_size_) {
                 packet->payload.resize(encoder_outbuf_size_);
                 esp_audio_enc_in_frame_t in = {
@@ -596,49 +662,57 @@ void AudioService::OpusCodecTask() {
                 auto ret = esp_opus_enc_process(opus_encoder_, &in, &out);
                 if (ret == ESP_AUDIO_ERR_OK) {
                     packet->payload.resize(out.encoded_bytes);
-
-                    if (task.type == kAudioTaskTypeEncodeToSendQueue) {
-                        {
-                            std::lock_guard<std::mutex> lock2(audio_queue_mutex_);
-                            /* Never let a full send queue stall encoding: stale realtime
-                             * audio is useless to the server, so drop the oldest packet. */
-                            if (audio_send_queue_.size() >= MAX_SEND_PACKETS_IN_QUEUE) {
-                                audio_send_queue_.pop_front();
-                            }
-                            audio_send_queue_.push_back(std::move(packet));
-                        }
-                        if (callbacks_.on_send_queue_available) {
-                            callbacks_.on_send_queue_available();
-                        }
-                    } else if (task.type == kAudioTaskTypeEncodeToTestingQueue) {
-                        bool testing_queue_full = false;
-                        {
-                            std::lock_guard<std::mutex> lock2(audio_queue_mutex_);
-                            testing_queue_full = !audio_testing_queue_.push_back(std::move(packet));
-                        }
-                        if (testing_queue_full && callbacks_.on_audio_testing_queue_full) {
-                            callbacks_.on_audio_testing_queue_full();
-                        }
-                    }
-                    debug_statistics_.encode_count++;
+                    encoded = true;
                 } else {
                     ESP_LOGE(TAG, "Failed to encode audio, error code: %d", ret);
                 }
             } else {
-                ESP_LOGE(TAG,
-                         "Failed to encode audio: encoder not configured or invalid frame size "
-                         "(got %u, expected %u)",
-                         task.pcm.size(), encoder_frame_size_);
+                ESP_LOGE(TAG, "Failed to encode audio: invalid encoder or frame size");
+            }
+#endif
+            if (encoded) {
+                if (task.type == kAudioTaskTypeEncodeToSendQueue) {
+                    {
+                        std::lock_guard<std::mutex> lock2(audio_queue_mutex_);
+                        /* Never let a full send queue stall encoding: stale realtime
+                         * audio is useless to the server, so drop the oldest packet. */
+                        if (audio_send_queue_.size() >= MAX_SEND_PACKETS_IN_QUEUE) {
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
+                            encoding_failed_ = true;
+#else
+                            audio_send_queue_.pop_front();
+#endif
+                        }
+                        if (!audio_send_queue_.full())
+                            audio_send_queue_.push_back(std::move(packet));
+                    }
+                    if (callbacks_.on_send_queue_available) {
+                        callbacks_.on_send_queue_available();
+                    }
+                } else if (task.type == kAudioTaskTypeEncodeToTestingQueue) {
+                    bool testing_queue_full = false;
+                    {
+                        std::lock_guard<std::mutex> lock2(audio_queue_mutex_);
+                        testing_queue_full = !audio_testing_queue_.push_back(std::move(packet));
+                    }
+                    if (testing_queue_full && callbacks_.on_audio_testing_queue_full) {
+                        callbacks_.on_audio_testing_queue_full();
+                    }
+                }
+                debug_statistics_.encode_count++;
             }
             lock.lock();
-        }
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
+            encode_in_flight_ = false;
+            audio_queue_cv_.notify_all();
 #endif
+        }
     }
 
     ESP_LOGW(TAG, "Opus codec task stopped");
 }
 
-#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifndef XIAOZHI_AUDIO_PLATFORM_BACKEND
 void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
     if (decoder_sample_rate_ == sample_rate && decoder_duration_ms_ == frame_duration) {
         return;
@@ -720,7 +794,7 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
 
 bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait) {
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
     if (!playback_accepting_ || playback_failed_ || !packet || packet->payload.empty() ||
         packet->payload.size() > 4096 || decode_queue_bytes_ + packet->payload.size() > 65536) {
         return false;
@@ -740,7 +814,7 @@ bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> pa
     if (service_stopped_.load() || generation != playback_generation_) {
         return false;
     }
-#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
     if (!playback_accepting_ || decode_queue_bytes_ + packet->payload.size() > 65536)
         return false;
     decode_queue_bytes_ += packet->payload.size();
@@ -751,7 +825,6 @@ bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> pa
     return true;
 }
 
-#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
 std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     if (audio_send_queue_.empty()) {
@@ -763,6 +836,7 @@ std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
     return packet;
 }
 
+#ifndef XIAOZHI_AUDIO_PLATFORM_BACKEND
 void AudioService::EncodeWakeWord() {
     if (audio_engine_) {
         audio_engine_->EncodeWakeWordData();
@@ -885,7 +959,7 @@ void AudioService::EnableDeviceAec(bool enable) {
 
 #endif
 void AudioService::SetCallbacks(AudioServiceCallbacks& callbacks) { callbacks_ = callbacks; }
-#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifndef XIAOZHI_AUDIO_PLATFORM_BACKEND
 
 void AudioService::PlaySound(const std::string_view& ogg) {
     if (!codec_->output_enabled()) {
@@ -931,7 +1005,7 @@ void AudioService::ResetDecoder() {
         std::unique_lock<std::mutex> decoder_lock(decoder_mutex_);
         if (platform_decoder_)
             platform_decoder_->Reset();
-#ifndef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifndef XIAOZHI_AUDIO_PLATFORM_BACKEND
         if (opus_decoder_ != nullptr) {
             esp_opus_dec_reset(opus_decoder_);
         }
@@ -964,7 +1038,7 @@ bool AudioService::MarkPlaybackDrainedLocked() {
     return true;
 }
 
-#ifdef XIAOZHI_AUDIO_PLAYBACK_ONLY
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
 bool AudioService::FinishPlayback() {
     {
         std::lock_guard<std::mutex> lock(audio_queue_mutex_);
@@ -1030,4 +1104,4 @@ bool AudioService::InitializeAudioEngine() {
     return true;
 }
 
-#endif  // XIAOZHI_AUDIO_PLAYBACK_ONLY
+#endif  // XIAOZHI_AUDIO_PLATFORM_BACKEND

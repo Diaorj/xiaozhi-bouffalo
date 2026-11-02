@@ -1,6 +1,6 @@
 #pragma once
 
-#define XIAOZHI_BUILD_TAG "ws-clean-close-20261102-v3"
+#define XIAOZHI_BUILD_TAG "voice-input-20261102-v4"
 
 #ifdef __cplusplus
 extern "C" {

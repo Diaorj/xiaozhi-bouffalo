@@ -4,7 +4,13 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-// CPU-only Opus state lives in PSRAM; DMA buffers and task stacks remain internal.
+// CPU-only audio buffers/state live in PSRAM; DMA buffers and task stacks remain internal.
+void* AudioSdkAllocateBuffer(size_t bytes);
+void AudioSdkFreeBuffer(void* buffer);
+// Half duplex. The owner closes capture before starting output.
+int AudioSdkRecordOpen(void);
+int AudioSdkRead(int16_t* pcm, size_t frames);
+void AudioSdkRecordClose(void);
 void* AudioSdkAllocateOpusState(size_t bytes);
 void AudioSdkFreeOpusState(void* state);
 int AudioSdkOpen(unsigned volume);

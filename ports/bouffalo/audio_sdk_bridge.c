@@ -1,4 +1,4 @@
-// Playback hardware extracted from the previously verified BL616CL demo.
+// Half-duplex audio hardware extracted from the previously verified BL616CL demo.
 // Only this C unit includes SDK codec/I2S/DMA headers; no Shell dependency.
 #include "audio_sdk_bridge.h"
 #include <stdbool.h>
@@ -33,6 +33,10 @@ static int16_t* pcm_ring;
 static uint32_t published, consumed, closed, cancelled, failed;
 static unsigned volume;
 static bool running;
+static bool input_running;
+static struct bflb_device_s* input_dma;
+static volatile uint32_t input_completed;
+static uint32_t input_consumed;
 static uint32_t load(const uint32_t* p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
 static void store(uint32_t* p, uint32_t v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
 // ISR only increments a counter. It never logs or calls the RTOS.
@@ -332,7 +336,7 @@ void AudioSdkFreeOpusState(void* state) {
 }
 
 int AudioSdkOpen(unsigned requested_volume) {
-    if (running || requested_volume > 100)
+    if (running || input_running || requested_volume > 100)
         return -1;
     MemoryDiagnosticsStage("speaker_open");
     pcm_ring = kmalloc(CAPACITY * sizeof(int16_t), MM_FLAG_HEAP_PSRAM_0);
@@ -413,4 +417,150 @@ void AudioSdkAbort(void) {
         store(&cancelled, 1);
         (void)AudioSdkFinish();
     }
+}
+
+// Input and output reuse the same internal no-cache DMA ring; they never overlap.
+static void input_dma_done(void* arg) {
+    (void)arg;
+    input_completed++;
+}
+
+void* AudioSdkAllocateBuffer(size_t bytes) {
+    return kmalloc(bytes, MM_FLAG_HEAP_PSRAM_0 | MM_FLAG_ALIGN_CACHE);
+}
+void AudioSdkFreeBuffer(void* buffer) {
+    if (buffer)
+        kfree(buffer);
+}
+
+void AudioSdkRecordClose(void) {
+    if (!input_running)
+        return;
+    if (input_dma) {
+        bflb_dma_channel_stop(input_dma);
+        bflb_dma_channel_tcint_mask(input_dma, true);
+    }
+    if (i2s) {
+        bflb_i2s_feature_control(i2s, I2S_CMD_DISABLE_CONTROL, I2S_ARG_CMD_MASTER | I2S_ARG_CMD_RX);
+        bflb_i2s_link_rxdma(i2s, false);
+        bflb_i2s_feature_control(i2s, I2S_CMD_CLEAR_RX_FIFO, 0);
+    }
+    if (codec.drv && i2c)
+        (void)codec_write_checked(0x0F, 0x24);
+    cleanup();
+    input_running = false;
+}
+
+int AudioSdkRecordOpen(void) {
+    if (running || input_running)
+        return -1;
+    input_dma = bflb_device_get_by_name("dma0_ch1");
+    if (!input_dma)
+        return -1;
+    input_running = true;  // Failure paths use the same stop/mute sequence.
+    if (setup_hardware() != 0)
+        goto fail;
+    struct bflb_device_s* gpio = bflb_device_get_by_name("gpio");
+    bflb_gpio_init(gpio, GPIO_PIN_6,
+                   GPIO_FUNC_I2S | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_1);
+    bflb_dma_channel_tcint_mask(dma, true);
+    // Verified board microphone: LIN2/RIN2, +18 dB PGA, ADC right = slot1/high16.
+    static const uint8_t settings[][2] = {
+        {0x19, 0x24}, {0x02, 0xF3}, {0x01, 0x40}, {0x06, 0x00}, {0x03, 0x08},
+        {0x09, 0x66}, {0x0A, 0x50}, {0x0B, 0x00}, {0x0C, 0x0C}, {0x0D, 0x06},
+        {0x18, 0x06}, {0x0E, 0x30}, {0x0F, 0x24}, {0x10, 0x00}, {0x11, 0x00},
+        {0x12, 0x00}, {0x16, 0x00}, {0x02, 0x00}};
+    for (size_t n = 0; n < sizeof(settings) / sizeof(settings[0]); n++)
+        if (codec_write_checked(settings[n][0], settings[n][1]) != 0)
+            goto fail;
+    struct bflb_i2s_config_s format = {
+        .bclk_freq_hz = 16000U * 16U * 2U,
+        .role = I2S_ROLE_MASTER,
+        .format_mode = I2S_MODE_LEFT_JUSTIFIED,
+        .channel_mode = I2S_CHANNEL_MODE_NUM_2,
+        .frame_width = I2S_SLOT_WIDTH_16,
+        .data_width = I2S_SLOT_WIDTH_16,
+        .fs_offset_cycle = 1,
+        .tx_fifo_threshold = 4,
+        .rx_fifo_threshold = 4};
+    bflb_i2s_init(i2s, &format);
+    bflb_i2s_feature_control(i2s, I2S_CMD_CHANNEL_LR_MERGE, true);
+    bflb_i2s_link_rxdma(i2s, true);
+    struct bflb_dma_channel_config_s transfer = {
+        .direction = DMA_PERIPH_TO_MEMORY,
+        .src_req = DMA_REQUEST_I2S_RX,
+        .dst_req = DMA_REQUEST_NONE,
+        .src_addr_inc = DMA_ADDR_INCREMENT_DISABLE,
+        .dst_addr_inc = DMA_ADDR_INCREMENT_ENABLE,
+        .src_burst_count = DMA_BURST_INCR1,
+        .dst_burst_count = DMA_BURST_INCR1,
+        .src_width = DMA_DATA_WIDTH_32BIT,
+        .dst_width = DMA_DATA_WIDTH_32BIT};
+    bflb_dma_channel_init(input_dma, &transfer);
+    bflb_dma_channel_tcint_clear(input_dma);
+    bflb_dma_channel_irq_attach(input_dma, input_dma_done, NULL);
+    memset(output, 0, sizeof(output));
+    struct bflb_dma_channel_lli_transfer_s blocks[BLOCKS];
+    for (unsigned n = 0; n < BLOCKS; n++)
+        blocks[n] = (struct bflb_dma_channel_lli_transfer_s){
+            .src_addr = DMA_ADDR_I2S_RDR,
+            .dst_addr = (uint32_t)(uintptr_t)output[n],
+            .nbytes = sizeof(output[n])};
+    if (bflb_dma_channel_lli_reload(input_dma, lli, BLOCKS, blocks, BLOCKS) != BLOCKS ||
+        codec_write_checked(0x0F, 0x20) != 0)
+        goto fail;
+    bflb_dma_channel_lli_link_head(input_dma, lli, BLOCKS);
+    input_completed = 0;
+    input_consumed = 0;
+    bflb_dma_channel_start(input_dma);
+    bflb_i2s_feature_control(i2s, I2S_CMD_ENABLE_CONTROL, I2S_ARG_CMD_MASTER | I2S_ARG_CMD_RX);
+    // Drain, do not just sleep: DMA continues to wrap while the ADC settles.
+    int16_t warmup[FRAMES];
+    for (unsigned n = 0; n < 20; n++)
+        if (AudioSdkRead(warmup, FRAMES) != FRAMES)
+            goto fail;
+    LOG_I("MIC_READY: 16000 Hz mono; slot1/high16; +18 dB; speaker muted\r\n");
+    return 0;
+fail:
+    AudioSdkRecordClose();
+    LOG_E("MIC_OPEN_FAILED\r\n");
+    return -1;
+}
+
+int AudioSdkRead(int16_t* pcm, size_t frames) {
+    if (!input_running || !pcm || !frames || frames % FRAMES)
+        return -1;
+    TickType_t progress = xTaskGetTickCount();
+    for (size_t saved = 0; saved < frames;) {
+        uint32_t ready = input_completed;
+        if (ready - input_consumed >= BLOCKS) {
+            LOG_E("MIC_DMA_OVERRUN: discard utterance\r\n");
+            return -1;
+        }
+        if (ready != input_consumed) {
+            __sync_synchronize();
+            const uint32_t* block = output[input_consumed % BLOCKS];
+            for (unsigned n = 0; n < FRAMES; n++)
+                pcm[saved + n] = (int16_t)(block[n] >> 16);
+            __sync_synchronize();
+            // Reject even a wrap that occurred during the copy.
+            if (input_completed - input_consumed >= BLOCKS)
+                return -1;
+            input_consumed++;
+            saved += FRAMES;
+            progress = xTaskGetTickCount();
+        } else {
+            if (xTaskGetTickCount() - progress > pdMS_TO_TICKS(500)) {
+                LOG_E("MIC_DMA_TIMEOUT\r\n");
+                return -1;
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+        if (getreg32(i2s->reg_base + I2S_FIFO_CONFIG_0_OFFSET) &
+            (I2S_RX_FIFO_OVERFLOW | I2S_RX_FIFO_UNDERFLOW)) {
+            LOG_E("MIC_FIFO_ERROR\r\n");
+            return -1;
+        }
+    }
+    return (int)frames;
 }

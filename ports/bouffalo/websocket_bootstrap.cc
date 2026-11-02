@@ -8,6 +8,9 @@
 #include "opus_decoder_bouffalo.h"
 #include "protocols/websocket_protocol.h"
 #include "settings.h"
+#if XIAOZHI_VOICE_INPUT_TEST
+#include "voice_input.h"
+#endif
 
 namespace {
 // Receiver callbacks only enqueue data/set flags. The network task owns cleanup.
@@ -52,7 +55,7 @@ bool RunOriginalWebsocketHandshake() {
             reply.Fail("connection closed before TTS stop");
         ESP_LOGW("WS", "ORIGINAL_WS_CLOSED: reset to reconnect");
     });
-    // This stage runs exactly one greeting. Do not leave an idle server session
+    // This stage runs exactly one reply. Do not leave an idle server session
     // behind after it finishes; close from the owner and join all callbacks.
     const auto close_session = [&] {
         reply.active = false;
@@ -96,6 +99,10 @@ bool RunOriginalWebsocketHandshake() {
             auto* text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text))
                 ESP_LOGI("WS", "XIAOZHI: %.512s", text->valuestring);
+        } else if (std::strcmp(type->valuestring, "stt") == 0) {
+            auto* text = cJSON_GetObjectItem(root, "text");
+            if (cJSON_IsString(text))
+                ESP_LOGI("WS", "RECOGNIZED: %.512s", text->valuestring);
         } else if (std::strcmp(type->valuestring, "alert") == 0) {
             auto* status = cJSON_GetObjectItem(root, "status");
             auto* message = cJSON_GetObjectItem(root, "message");
@@ -108,6 +115,15 @@ bool RunOriginalWebsocketHandshake() {
             ESP_LOGE("WS", "SERVER_REPLY_ERROR");
         }
     });
+#if XIAOZHI_VOICE_INPUT_TEST
+    auto* codec = Board::GetInstance().GetAudioCodec();
+    audio.Initialize(codec);
+    auto voice = PrepareVoiceInput(audio, codec);
+    if (!voice) {
+        ESP_LOGE("VOICE", "VOICE_INPUT_NOT_READY: reset to retry");
+        return false;
+    }
+#endif
     if (!protocol.Start() || !protocol.OpenAudioChannel()) {
         protocol.CloseAudioChannel(false);
         ESP_LOGW("WS", "ORIGINAL_WS_NOT_READY: reset to retry");
@@ -137,9 +153,28 @@ bool RunOriginalWebsocketHandshake() {
     const TickType_t started = xTaskGetTickCount();
     reply.last_packet = started;
     reply.active = true;
+#if XIAOZHI_VOICE_INPUT_TEST
+    protocol.SendStartListening(kListeningModeManualStop);
+    ESP_LOGI("VOICE", "VOICE_UPLOAD_BEGIN: 84 Opus packets, paced at 60 ms");
+    for (size_t i = 0; i < voice->size(); i++) {
+        if (reply.failure.load() || !protocol.IsAudioChannelOpened() ||
+            !protocol.SendAudio(voice->Packet(i))) {
+            reply.Fail("voice upload failed");
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(60));
+    }
+    voice.reset();
+    if (!reply.failure.load()) {
+        protocol.SendStopListening();
+        ESP_LOGI("VOICE", "VOICE_UPLOADED: waiting for recognition and reply");
+    }
+    reply.last_packet = xTaskGetTickCount();
+#else
     // Official listen/detect accepts a short wake phrase, not an arbitrary question.
     protocol.SendWakeWordDetected("你好小智");
     ESP_LOGI("WS", "WAKE_GREETING_REQUESTED: standard short wake phrase; first audio timeout=30s");
+#endif
 
     bool ok = false;
     for (;;) {
