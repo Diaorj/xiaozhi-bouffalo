@@ -27,12 +27,14 @@ target_sources(app PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/opus_decoder_bouffalo.cc"
     "${CMAKE_CURRENT_LIST_DIR}/audio_codec_bouffalo.cc"
     "${CMAKE_CURRENT_LIST_DIR}/audio_sdk_bridge.c"
+    "${CMAKE_CURRENT_LIST_DIR}/speaker_worker.c"
     "${CMAKE_CURRENT_LIST_DIR}/pcm_ring.c"
     "${CMAKE_CURRENT_LIST_DIR}/memory_diagnostics.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../main/audio/audio_codec.cc"
     "${CMAKE_CURRENT_LIST_DIR}/network_websocket.cc"
     "${CMAKE_CURRENT_LIST_DIR}/tcp_bouffalo.cc"
     "${CMAKE_CURRENT_LIST_DIR}/tls_sdk_bridge.c"
+    "${CMAKE_CURRENT_LIST_DIR}/tls_read_diagnostics.c"
     "${CMAKE_CURRENT_LIST_DIR}/websocket_support.cc"
     "${CMAKE_CURRENT_LIST_DIR}/../../main/protocols/protocol.cc"
     "${CMAKE_CURRENT_LIST_DIR}/../../main/protocols/websocket_protocol.cc"
@@ -49,6 +51,21 @@ target_sources(app PRIVATE
 # Keep the ESP log adapter local to application sources, not SDK libraries.
 target_include_directories(app PRIVATE "${CMAKE_CURRENT_LIST_DIR}/compat")
 target_include_directories(${CMAKE_PROJECT_NAME}.elf PRIVATE "${CMAKE_CURRENT_LIST_DIR}/compat")
+
+# Temporary diagnostics for SDKs without pthread key APIs. Keep this opt-in so
+# SDKs with real implementations retain their normal behavior.
+option(XIAOZHI_PTHREAD_KEY_ASSERT_STUBS "Trap unsupported pthread key API calls" OFF)
+if(XIAOZHI_PTHREAD_KEY_ASSERT_STUBS)
+    message(WARNING "pthread key assertion stubs enabled: any call will halt the firmware")
+    foreach(target app ${CMAKE_PROJECT_NAME}.elf)
+        target_include_directories(${target} BEFORE PRIVATE
+            "${CMAKE_CURRENT_LIST_DIR}/compat/pthread_key_assert")
+    endforeach()
+    # Link directly into the executable: weak libstdc++ references alone would
+    # not extract an otherwise unreferenced member from the application archive.
+    target_sources(${CMAKE_PROJECT_NAME}.elf PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/pthread_key_assert.c")
+endif()
 
 # The original state machine uses C++17 structured bindings.
 set_target_properties(app ${CMAKE_PROJECT_NAME}.elf PROPERTIES
@@ -113,4 +130,4 @@ configure_file("${CMAKE_CURRENT_LIST_DIR}/sdk_audio_codec.h.in" "${network_inclu
 
 # Retain caller/size through the SDK allocator failure hook without editing SDK code.
 target_link_options(${CMAKE_PROJECT_NAME}.elf PRIVATE
-    "-Wl,--wrap=pvPortMalloc" "-Wl,--wrap=kmalloc")
+    "-Wl,--wrap=pvPortMalloc" "-Wl,--wrap=kmalloc" "-Wl,--wrap=mbedtls_ssl_read")

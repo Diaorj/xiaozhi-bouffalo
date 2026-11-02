@@ -1,6 +1,6 @@
 #pragma once
 
-#define XIAOZHI_BUILD_TAG "audio-memdiag-20261027-v1"
+#define XIAOZHI_BUILD_TAG "ws-clean-close-20261102-v3"
 
 #ifdef __cplusplus
 extern "C" {

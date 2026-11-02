@@ -70,6 +70,12 @@ def prepare(source, destination):
             return;
         }
         uint8_t mask_key[4] = {0};''')
+    text = replace_once(text, '            case 0x8: // 关闭帧',
+        '            case 0x8: // 关闭帧\n'
+        '                ESP_LOGW(TAG, "WS_CLOSE_FRAME: code=%u reason_bytes=%u",\n'
+        '                    payload.size() >= 2 ? (unsigned(uint8_t(payload[0])) << 8) |\n'
+        '                        unsigned(uint8_t(payload[1])) : 1005U,\n'
+        '                    unsigned(payload.size() >= 2 ? payload.size() - 2 : 0));')
     text = replace_once(text, '                connected_ = false;\n                if (on_disconnected_) {',
         '                connected_ = false;\n                xEventGroupSetBits(handshake_event_group_, HANDSHAKE_FAILED_BIT);\n                if (on_disconnected_) {')
     text = replace_once(text, '                break;\n            case 0x9: // Ping',

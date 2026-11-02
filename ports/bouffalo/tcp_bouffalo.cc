@@ -30,11 +30,15 @@ int BouffaloSsl::Send(const std::string& data) {
     while (sent < data.size()) {
         int result = TlsSdkWrite(tls_, data.data() + sent, std::min(size_t(4096), data.size() - sent));
         if (result <= 0 || size_t(result) > data.size() - sent) {
+            ESP_LOGE("TLS", "WSS_TX_FAILED: result=%d sent=%u total=%u", result,
+                     unsigned(sent), unsigned(data.size()));
             stop_ = true;
             return -1;  // Tcp::Send succeeds only after the entire frame is sent.
         }
         sent += result;
     }
+    // Transport acceptance is not proof that the server processed the message.
+    ESP_LOGI("TLS", "WSS_TX_OK: bytes=%u", unsigned(sent));
     // Upstream WebSocket registers OnStream after Connect, before its first Send.
     if (!receiver_started_) {
         xEventGroupClearBits(finished_, 1);
@@ -64,6 +68,7 @@ void BouffaloSsl::ReceiveLoop() {
         if (count > 0) {
             if (stream_callback_) stream_callback_(std::string(buffer, count));
         } else if (count != -2) {
+            ESP_LOGW("TLS", "WSS_RX_ENDED: ret=%d; see TLS_READ_ERROR/CLOSED if present", count);
             break;
         } else {
             vTaskDelay(pdMS_TO_TICKS(10));

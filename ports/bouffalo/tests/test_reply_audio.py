@@ -3,6 +3,7 @@ The transport simulator emits 24 kHz Opus; decoded output must be 16 kHz PCM.
 """
 from pathlib import Path
 import re
+import os
 import subprocess
 import tempfile
 import unittest
@@ -13,7 +14,7 @@ class ReplyAudioTests(unittest.TestCase):
     def test_full_reply_with_real_sdk_opus(self):
         with tempfile.TemporaryDirectory() as directory:
             work=Path(directory)
-            opus=ROOT.parents[2]/'components/multimedia/opus'
+            opus=Path(os.environ.get('XIAOZHI_HOST_OPUS_SOURCE', str(ROOT.parents[2]/'components/multimedia/opus')))
             cmake=(opus/'CMakeLists.txt').read_text()
             sources=re.findall(r'^    (src/[^\s]+\.c)$',cmake,re.M)
             self.assertGreater(len(sources),100)
@@ -177,6 +178,10 @@ int main(int argc,char** argv) {
         puts("FULL_AUDIO_LIFECYCLE_OK");return 0;
     }
     const bool ok=RunOriginalWebsocketHandshake();
+    // Cleanup must already be complete when the one-shot bootstrap returns.
+    assert(live_tls==0);
+    if(test_case!=2 && test_case!=16)assert(close_count==1);
+    else assert(close_count<=1);  // The peer may have closed first.
     assert(ok==(test_case==0 || test_case==5 || test_case==6 || test_case==16));
     // The worker's success/failure log is checked by the outer test.
     for(int i=0;i<3000 && test_case!=10 && test_case!=11 && test_case!=17 && finished_audio==0 && abort_audio==0;i++)
@@ -197,8 +202,10 @@ int main(int argc,char** argv) {
             subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-pthread','-DXIAOZHI_PLATFORM_BOUFFALO=1','-DXIAOZHI_AUDIO_PLAYBACK_ONLY=1',*['-I'+str(x) for x in include],*[str(x) for x in sources],'-lm','-o',str(work/'check')],check=True)
             for case in range(18):
                 with self.subTest(case=case):
-                    result=subprocess.run([str(work/'check'),str(case)],capture_output=True,text=True,timeout=25)
+                    result=subprocess.run([str(work/'check'),str(case)],capture_output=True,text=True,timeout=40 if case==14 else 25)
                     self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                    if case not in (12,13):
+                        self.assertIn('WS_SESSION_RELEASED:',result.stdout)
                     if case==17:
                         self.assertIn('OPUS_PSRAM_ALLOC_FAILED:',result.stdout)
                         continue
@@ -209,12 +216,12 @@ int main(int argc,char** argv) {
                         self.assertIn('AUDIO_WORKER_START_FAILED',result.stdout)
                         continue
                     self.assertIn('AUDIO_SERVICE_READY:',result.stdout)
-                    if case==14:self.assertIn('no audio received within 15s',result.stdout)
+                    if case==14:self.assertIn('no audio received within 30s',result.stdout)
                     if case==7:
                         self.assertIn('SERVER_ALERT: status=ERROR',result.stdout)
                         self.assertIn('Detect is only for wake words',result.stdout)
                         self.assertIn('server or network error',result.stdout)
-                        self.assertNotIn('no audio received within 15s',result.stdout)
+                        self.assertNotIn('no audio received within 30s',result.stdout)
                     self.assertIn('FULL_AUDIO_TEST_OK',result.stdout)
                     self.assertEqual('AUDIO_REPLY_DONE:' in result.stdout,case in (0,5,6,16),result.stdout)
                     self.assertEqual('AUDIO_REPLY_FAILED:' in result.stdout,case not in (0,5,6,16),result.stdout)

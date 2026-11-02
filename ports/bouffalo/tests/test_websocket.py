@@ -28,7 +28,7 @@ HARNESS = r"""
 #include "websocket_support.h"
 
 static int mode, live_tls, requests, hello_count;
-static std::atomic<int> pong_count{0};
+static std::atomic<int> pong_count{0}, close_count{0};
 static std::vector<std::thread> threads;
 static thread_local void* task_id = nullptr;
 struct MockEvent { std::mutex lock; std::condition_variable changed; unsigned bits=0; };
@@ -92,7 +92,10 @@ extern "C" void* TlsSdkConnect(const char* host,int port) {
 }
 extern "C" int TlsSdkWrite(void* handle,const void* data,size_t size) {
     if(mode==6)return -1;
-    auto t=static_cast<MockTls*>(handle);std::lock_guard<std::mutex> l(t->lock);
+    auto t=static_cast<MockTls*>(handle);
+    std::lock_guard<std::mutex> l(t->lock);
+    if(mode==15 && t->upgraded && t->pending.empty() && size>=2 &&
+       static_cast<const unsigned char*>(data)[0]==0x88)return -1;
     const size_t n=std::min(size,size_t(7));t->pending.append(static_cast<const char*>(data),n);
     if(!t->upgraded) {
         const auto end=t->pending.find("\r\n\r\n");
@@ -120,6 +123,11 @@ extern "C" int TlsSdkWrite(void* handle,const void* data,size_t size) {
         for(size_t i=0;i<len;i++)payload[i]^=t->pending[header+i%4];
         t->pending.erase(0,header+4+len);
         if(opcode==10) { assert(payload=="ping");++pong_count;continue; }
+        if(opcode==8) {
+            assert(payload.empty());++close_count;
+            if(mode!=14)queue(t,frame(payload,0x88));
+            continue;
+        }
         assert(opcode==1);
         auto root=cJSON_Parse(payload.c_str());assert(root);
         assert(std::strcmp(cJSON_GetObjectItem(root,"type")->valuestring,"hello")==0);
@@ -192,13 +200,16 @@ int main(int argc,char** argv) {
     {
         WebsocketProtocol protocol;
         assert(protocol.Start());
-        bool ok=protocol.OpenAudioChannel();assert(ok==(mode==0));
+        bool ok=protocol.OpenAudioChannel();assert(ok==(mode==0 || mode==14 || mode==15));
         if(ok) {
             assert(protocol.session_id()=="test-session" && protocol.server_sample_rate()==24000);
             assert(protocol.IsAudioChannelOpened());
             for(int i=0;i<100 && pong_count==0;i++)std::this_thread::sleep_for(std::chrono::milliseconds(1));
             assert(pong_count==1);
-            protocol.CloseAudioChannel(false);assert(!protocol.IsAudioChannelOpened());
+            protocol.CloseAudioChannel(true);assert(!protocol.IsAudioChannelOpened());
+            assert(live_tls==0 && close_count==(mode==15?0:1));
+            protocol.CloseAudioChannel(true);assert(live_tls==0);
+            assert(close_count==(mode==15?0:1));
             // A successful old hello must not make the next failed open succeed.
             mode=4;assert(!protocol.OpenAudioChannel());
         }
@@ -229,7 +240,7 @@ class WebsocketTests(unittest.TestCase):
             includes=[work,work/'interfaces',PORT,PORT/'compat',ROOT/'main',ROOT/'main/boards/common',ROOT/'third_party/tl-expected/include',CJSON]
             sources=[ROOT/'main/protocols/protocol.cc',ROOT/'main/protocols/websocket_protocol.cc',PORT/'tcp_bouffalo.cc',PORT/'websocket_support.cc',work/'web_socket.cc',work/'test.cc',work/'json.o']
             subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-DXIAOZHI_PLATFORM_BOUFFALO=1','-pthread',*['-I'+str(x) for x in includes],*[str(x) for x in sources],'-o',str(work/'test')],check=True)
-            for mode in range(14):
+            for mode in range(16):
                 with self.subTest(mode=mode):
                     result=subprocess.run([str(work/'test'),str(mode)],check=False,text=True,capture_output=True,timeout=10)
                     self.assertEqual(result.returncode,0,result.stdout+result.stderr)

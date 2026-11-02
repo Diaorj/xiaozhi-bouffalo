@@ -14,7 +14,10 @@ namespace {
 struct ReplyState {
     std::atomic<bool> active{false};
     std::atomic<bool> ended{false};
+    std::atomic<bool> closing{false};
     std::atomic<unsigned> packets{0};
+    std::atomic<unsigned> json_messages{0};
+    std::atomic<bool> tts_started{false};
     std::atomic<TickType_t> last_packet{0};
     std::atomic<const char*> failure{nullptr};
     void Fail(const char* reason) {
@@ -41,10 +44,24 @@ bool RunOriginalWebsocketHandshake() {
         ESP_LOGE("WS", "ORIGINAL_WS_FAILED: %s", error.c_str());
     });
     protocol.OnAudioChannelClosed([] {
+        if (reply.closing) {
+            ESP_LOGI("WS", "WS_CHANNEL_CLOSED: local cleanup in progress");
+            return;
+        }
         if (!reply.ended)
             reply.Fail("connection closed before TTS stop");
         ESP_LOGW("WS", "ORIGINAL_WS_CLOSED: reset to reconnect");
     });
+    // This stage runs exactly one greeting. Do not leave an idle server session
+    // behind after it finishes; close from the owner and join all callbacks.
+    const auto close_session = [&] {
+        reply.active = false;
+        reply.closing = true;
+        protocol.CloseAudioChannel(true);
+        reply.closing = false;
+        ESP_LOGI("WS", "WS_SESSION_RELEASED: socket and receiver released; reset test is ready");
+        MemoryDiagnosticsStage("after_ws_session_close");
+    };
     protocol.OnIncomingAudio([](std::unique_ptr<AudioStreamPacket> packet) {
         if (!reply.active)
             return;
@@ -59,8 +76,19 @@ bool RunOriginalWebsocketHandshake() {
         auto* type = cJSON_GetObjectItem(root, "type");
         if (!cJSON_IsString(type))
             return;
+        auto* state = cJSON_GetObjectItem(root, "state");
+        if (reply.active) {
+            const unsigned index = ++reply.json_messages;
+            if (index <= 16) {
+                ESP_LOGI("WS", "REPLY_JSON: type=%.48s state=%.48s", type->valuestring,
+                         cJSON_IsString(state) ? state->valuestring : "none");
+            }
+            if (std::strcmp(type->valuestring, "tts") == 0 && cJSON_IsString(state) &&
+                std::strcmp(state->valuestring, "start") == 0) {
+                reply.tts_started = true;
+            }
+        }
         if (std::strcmp(type->valuestring, "tts") == 0) {
-            auto* state = cJSON_GetObjectItem(root, "state");
             if (cJSON_IsString(state) && std::strcmp(state->valuestring, "stop") == 0) {
                 ESP_LOGI("WS", "TTS_STOP: drain queued audio before muting");
                 reply.ended = true;
@@ -90,26 +118,28 @@ bool RunOriginalWebsocketHandshake() {
     MemoryDiagnosticsStage("before_opus_state");
     auto decoder = CreateBouffaloOpusDecoder();
     if (!decoder) {
-        protocol.CloseAudioChannel(false);
+        close_session();
         return false;
     }
     audio.Initialize(Board::GetInstance().GetAudioCodec(), std::move(decoder));
     audio.Start();
     if (!audio.IsRunning()) {
         ESP_LOGE("WS", "AUDIO_WORKER_START_FAILED");
-        protocol.CloseAudioChannel(false);
+        close_session();
         return false;
     }
     MemoryDiagnosticsStage("audio_service_tasks_created");
     reply.ended = false;
     reply.failure = nullptr;
     reply.packets = 0;
+    reply.json_messages = 0;
+    reply.tts_started = false;
     const TickType_t started = xTaskGetTickCount();
     reply.last_packet = started;
     reply.active = true;
     // Official listen/detect accepts a short wake phrase, not an arbitrary question.
     protocol.SendWakeWordDetected("你好小智");
-    ESP_LOGI("WS", "WAKE_GREETING_SENT: standard short wake phrase; volume=15; AudioService");
+    ESP_LOGI("WS", "WAKE_GREETING_REQUESTED: standard short wake phrase; first audio timeout=30s");
 
     bool ok = false;
     for (;;) {
@@ -130,16 +160,22 @@ bool RunOriginalWebsocketHandshake() {
             reply.Fail("reply total timeout");
             break;
         }
-        if (!reply.ended && now - reply.last_packet.load() > pdMS_TO_TICKS(15000)) {
-            reply.Fail(reply.packets ? "audio stalled" : "no audio received within 15s");
+        // Allow cloud synthesis more time before the first audio packet.
+        const TickType_t silence_limit = pdMS_TO_TICKS(reply.packets.load() ? 15000 : 30000);
+        if (!reply.ended && now - reply.last_packet.load() > silence_limit) {
+            reply.Fail(reply.packets ? "audio stalled" : "no audio received within 30s");
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(5));
     }
+    ESP_LOGI("WS", "REPLY_SUMMARY: audio_packets=%u json_messages=%u tts_started=%d channel_open=%d",
+             reply.packets.load(), reply.json_messages.load(), int(reply.tts_started.load()),
+             int(protocol.IsAudioChannelOpened()));
     ok = ok && !reply.failure.load();
     reply.active = false;
     MemoryDiagnosticsStage("before_audio_service_stop");
     audio.Stop();  // Joins both original workers before abort/free on a failure.
+    close_session();
     if (ok) {
         ESP_LOGI("Audio", "AUDIO_REPLY_DONE: AudioService packets=%u; speaker drained and muted",
                  reply.packets.load());

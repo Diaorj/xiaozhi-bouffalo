@@ -11,12 +11,12 @@
 #include "bflb_i2c.h"
 #include "bflb_i2s.h"
 #include "bl616cl_glb.h"
-#include "event_groups.h"
 #include "hardware/i2s_reg.h"
 #include "memory_diagnostics.h"
 #include "mm.h"
 #include "pcm_ring.h"
 #include "sdk_audio_codec.h"
+#include "speaker_worker.h"
 #include "task.h"
 #define DBG_TAG "SPEAKER"
 #include "log.h"
@@ -32,7 +32,6 @@ static volatile uint32_t completed_blocks;
 static int16_t* pcm_ring;
 static uint32_t published, consumed, closed, cancelled, failed;
 static unsigned volume;
-static EventGroupHandle_t done;
 static bool running;
 static uint32_t load(const uint32_t* p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
 static void store(uint32_t* p, uint32_t v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
@@ -306,7 +305,7 @@ static int play(void) {
     }
     return 0;
 }
-static void output_task(void* arg) {
+static void output_job(void* arg) {
     (void)arg;
     TickType_t started = xTaskGetTickCount();
     while (!load(&closed) && !load(&cancelled) && load(&published) < 3200) {
@@ -320,8 +319,6 @@ static void output_task(void* arg) {
         store(&failed, 1);
     cleanup();
     MemoryDiagnosticsStage("speaker_task_done");
-    xEventGroupSetBits(done, 1);
-    vTaskDelete(NULL);
 }
 void* AudioSdkAllocateOpusState(size_t bytes) {
     void* state = kmalloc(bytes, MM_FLAG_HEAP_PSRAM_0 | MM_FLAG_ALIGN_CACHE);
@@ -338,10 +335,6 @@ int AudioSdkOpen(unsigned requested_volume) {
     if (running || requested_volume > 100)
         return -1;
     MemoryDiagnosticsStage("speaker_open");
-    if (!done)
-        done = xEventGroupCreate();
-    if (!done)
-        return -1;
     pcm_ring = kmalloc(CAPACITY * sizeof(int16_t), MM_FLAG_HEAP_PSRAM_0);
     if (!pcm_ring) {
         LOG_E("AUDIO_PSRAM_ALLOC_FAILED\r\n");
@@ -359,10 +352,10 @@ int AudioSdkOpen(unsigned requested_volume) {
         pcm_ring = NULL;
         return -1;
     }
-    xEventGroupClearBits(done, 1);
     MemoryDiagnosticsStage("before_speaker_task_create");
-    LOG_I("SPEAKER_TASK_CREATE: stack_bytes=%lu\r\n", (unsigned long)(1536 * sizeof(StackType_t)));
-    if (xTaskCreate(output_task, "speaker_dma", 1536, NULL, 8, NULL) != pdPASS) {
+    LOG_I("SPEAKER_TASK_STATIC: stack_bytes=%lu; internal RAM reserved\r\n",
+          (unsigned long)(SPEAKER_WORKER_STACK_WORDS * sizeof(StackType_t)));
+    if (SpeakerWorkerStart(output_job, NULL) != 0) {
         cleanup();
         kfree(pcm_ring);
         pcm_ring = NULL;
@@ -407,7 +400,8 @@ int AudioSdkFinish(void) {
     if (!running)
         return -1;
     store(&closed, 1);
-    xEventGroupWaitBits(done, 1, pdFALSE, pdTRUE, portMAX_DELAY);
+    if (SpeakerWorkerWait() != 0)
+        return -1;
     int result = load(&failed) ? -1 : 0;
     kfree(pcm_ring);
     pcm_ring = NULL;

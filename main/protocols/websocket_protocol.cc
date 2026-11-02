@@ -1,6 +1,7 @@
 #include "websocket_protocol.h"
 #ifdef XIAOZHI_PLATFORM_BOUFFALO
 #include "websocket_port_config.h"
+#include <freertos/task.h>
 #else
 #include "application.h"
 #endif
@@ -82,7 +83,22 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
 }
 
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+    // Only the owning control task may close/join the transport. A receiver
+    // callback must never destroy the WebSocket that is currently invoking it.
+    if (send_goodbye && websocket_ && websocket_->IsConnected()) {
+        ESP_LOGI(TAG, "WS_CLOSE_BEGIN: sending close frame; peer wait at most 1000 ms");
+        websocket_->Close();
+        const TickType_t started = xTaskGetTickCount();
+        while (websocket_->IsConnected() &&
+               xTaskGetTickCount() - started < pdMS_TO_TICKS(1000)) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+#else
     (void)send_goodbye;  // Websocket doesn't need to send goodbye message
+#endif
+    // Also releases TLS/socket and joins its receiver if the peer never replies.
     websocket_.reset();
 }
 
