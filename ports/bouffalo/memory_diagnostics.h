@@ -1,6 +1,6 @@
 #pragma once
 
-#define XIAOZHI_BUILD_TAG "auto-chat-20261103-v6"
+#define XIAOZHI_BUILD_TAG "network-recovery-20261103-v7"
 
 #ifdef __cplusplus
 extern "C" {

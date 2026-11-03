@@ -4,6 +4,8 @@
 #include "websocket_bootstrap.h"
 #include "wifi_sdk_bridge.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 
 #include <esp_log.h>
@@ -33,6 +35,14 @@ constexpr uint32_t kInfoReady = 1u << 9;
 constexpr uint32_t kInfoFailed = 1u << 10;
 constexpr unsigned kStageTimeoutMs = 15000;
 constexpr unsigned kConnectTimeoutMs = 30000;
+constexpr unsigned kRetryFirstMs = 3000;
+constexpr unsigned kRetryMaxMs = 30000;
+std::atomic<bool> link_failed{true};
+std::atomic<bool> parameters_rejected{false};
+std::atomic<uint32_t> info_completed{0};
+std::atomic<bool> info_valid{false};
+TaskHandle_t network_task;
+uint32_t info_sequence = 0;
 char configured_ssid[33];
 char configured_password[65];
 
@@ -62,15 +72,20 @@ void OnWifiEvent(wifi_sdk_event_t event, void* context) {
             Notify(static_cast<TaskHandle_t>(context), kGotIpv4);
             break;
         case WIFI_SDK_DISCONNECTED:
+            link_failed = true;
             Notify(static_cast<TaskHandle_t>(context), kDisconnected);
             break;
         case WIFI_SDK_LOST_IPV4:
+            link_failed = true;
             Notify(static_cast<TaskHandle_t>(context), kLostIpv4);
             break;
         case WIFI_SDK_DHCP_TIMEOUT:
+            link_failed = true;
             Notify(static_cast<TaskHandle_t>(context), kDhcpTimeout);
             break;
         case WIFI_SDK_PARAMETER_ERROR:
+            link_failed = true;
+            parameters_rejected = true;
             Notify(static_cast<TaskHandle_t>(context), kParameterError);
             break;
         default:
@@ -133,6 +148,7 @@ bool InitializeNetwork(TaskHandle_t task) {
 
 // This callback runs in the lwIP core thread, where netif and DNS can be read.
 void PrintNetworkInfo(void* context) {
+    const auto sequence = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(context));
     struct netif* iface;
     NETIF_FOREACH(iface) {
         if (!netif_is_up(iface) || !netif_is_link_up(iface) ||
@@ -149,38 +165,60 @@ void PrintNetworkInfo(void* context) {
         ESP_LOGI(TAG, "Netmask: %s", ip4addr_ntoa(netif_ip4_netmask(iface)));
         ESP_LOGI(TAG, "Gateway: %s", ip4addr_ntoa(netif_ip4_gw(iface)));
         ESP_LOGI(TAG, "DNS server: %s", ipaddr_ntoa(dns_getserver(0)));
-        Notify(static_cast<TaskHandle_t>(context), kInfoReady);
+        info_valid = true;
+        info_completed.store(sequence, std::memory_order_release);
+        Notify(network_task, kInfoReady);
         return;
     }
-    Notify(static_cast<TaskHandle_t>(context), kInfoFailed);
+    info_valid = false;
+    info_completed.store(sequence, std::memory_order_release);
+    Notify(network_task, kInfoFailed);
 }
 
-bool ReportAddress(TaskHandle_t task) {
-    if (tcpip_try_callback(PrintNetworkInfo, task) != ERR_OK) {
+bool NetworkAvailable() {
+    return !link_failed.load();
+}
+
+bool ReportAddress() {
+    // Tag each request so a late lwIP callback from a timed-out attempt cannot
+    // validate the next attempt. The callback's task owner has static lifetime.
+    const uint32_t sequence = ++info_sequence;
+    if (tcpip_try_callback(PrintNetworkInfo,
+                           reinterpret_cast<void*>(static_cast<uintptr_t>(sequence))) != ERR_OK) {
         ESP_LOGW(TAG, "WIFI_CONNECT_FAILED: cannot schedule address inspection");
         return false;
     }
-    uint32_t events = 0;
-    if (xTaskNotifyWait(0, UINT32_MAX, &events, pdMS_TO_TICKS(kStageTimeoutMs)) != pdTRUE ||
-        (events & kInfoReady) == 0 ||
-        (events & (kDisconnected | kLostIpv4 | kDhcpTimeout | kParameterError | kInfoFailed)) != 0) {
-        ESP_LOGW(TAG, "WIFI_CONNECT_FAILED: no usable IPv4 address; reset to retry");
-        return false;
+    const TickType_t started = xTaskGetTickCount();
+    while (NetworkAvailable()) {
+        if (info_completed.load(std::memory_order_acquire) == sequence) {
+            if (!info_valid.load())
+                break;
+            ESP_LOGI(TAG, "WIFI_READY: IPv4 acquired; DNS/Internet/server not tested");
+            return true;
+        }
+        const TickType_t elapsed = xTaskGetTickCount() - started;
+        if (elapsed >= pdMS_TO_TICKS(kStageTimeoutMs))
+            break;
+        uint32_t events = 0;
+        xTaskNotifyWait(0, UINT32_MAX, &events, pdMS_TO_TICKS(kStageTimeoutMs) - elapsed);
     }
-    ESP_LOGI(TAG, "WIFI_READY: IPv4 acquired; DNS/Internet/server not tested");
-    return true;
+    ESP_LOGW(TAG, "WIFI_CONNECT_FAILED: no usable IPv4 address");
+    return false;
 }
 
-bool ConnectHotspot(TaskHandle_t task) {
-    if (configured_ssid[0] == '\0') {
-        ESP_LOGW(TAG, "WIFI_NOT_CONFIGURED: edit ports/bouffalo/wifi_config.h and rebuild");
-        return false;
-    }
-    ESP_LOGI(TAG, "WIFI_CONNECT_BEGIN: configured 2.4 GHz hotspot; one attempt");
+enum class ConnectResult { Ready, Retry, BadParameters };
+
+ConnectResult ConnectHotspot() {
+    // Consume previous-attempt notifications only after its cleanup/backoff.
+    uint32_t stale = 0;
+    xTaskNotifyWait(0, UINT32_MAX, &stale, 0);
+    parameters_rejected = false;
+    link_failed = false;
+    ESP_LOGI(TAG, "WIFI_CONNECT_BEGIN: configured 2.4 GHz hotspot; PMF optional");
     const int result = WifiSdkConnect(configured_ssid, configured_password);
     if (result != 0) {
-        ESP_LOGW(TAG, "WIFI_CONNECT_FAILED: request ret=%d; reset to retry", result);
-        return false;
+        ESP_LOGW(TAG, "WIFI_CONNECT_FAILED: request ret=%d", result);
+        return parameters_rejected ? ConnectResult::BadParameters : ConnectResult::Retry;
     }
     bool associated = false;
     TickType_t started = xTaskGetTickCount();
@@ -190,44 +228,144 @@ bool ConnectHotspot(TaskHandle_t task) {
         uint32_t events = 0;
         if (elapsed >= timeout ||
             xTaskNotifyWait(0, UINT32_MAX, &events, timeout - elapsed) != pdTRUE) {
-            ESP_LOGW(TAG, "WIFI_CONNECT_FAILED: timeout waiting for %s; reset to retry",
+            ESP_LOGW(TAG, "WIFI_CONNECT_FAILED: timeout waiting for %s",
                      associated ? "DHCP" : "association");
-            return false;
+            return ConnectResult::Retry;
         }
-        if ((events & (kDisconnected | kLostIpv4 | kDhcpTimeout | kParameterError)) != 0) {
-            ESP_LOGW(TAG, "WIFI_CONNECT_FAILED: %s; reset to retry",
-                     (events & kParameterError) ? "parameters rejected" :
+        if ((events & (kDisconnected | kLostIpv4 | kDhcpTimeout | kParameterError)) != 0 ||
+            !NetworkAvailable()) {
+            ESP_LOGW(TAG, "WIFI_CONNECT_FAILED: %s",
+                     parameters_rejected ? "parameters rejected" :
                      (events & kDhcpTimeout) ? "DHCP timeout" : "connection lost");
-            return false;
+            return parameters_rejected ? ConnectResult::BadParameters : ConnectResult::Retry;
         }
         if ((events & kAssociated) != 0 && !associated) {
             associated = true;
             started = xTaskGetTickCount();
             ESP_LOGI(TAG, "WIFI_ASSOCIATED: waiting for DHCP");
         }
-        if ((events & kGotIpv4) != 0) {
-            return ReportAddress(task);
+        if ((events & kGotIpv4) != 0)
+            return ReportAddress() ? ConnectResult::Ready :
+                   parameters_rejected ? ConnectResult::BadParameters : ConnectResult::Retry;
+    }
+}
+
+bool ResetStation() {
+    // A DHCP timeout can leave the station associated. Tear it down before a
+    // fresh DHCP attempt; never overlap this with a live audio/TLS session.
+    link_failed = true;
+    const int result = WifiSdkDisconnect();
+    if (result != 0) {
+        ESP_LOGW(TAG, "WIFI_RESET_FAILED: disconnect ret=%d", result);
+        return false;
+    }
+    const TickType_t started = xTaskGetTickCount();
+    while (WifiSdkStationConnected()) {
+        if (xTaskGetTickCount() - started >= pdMS_TO_TICKS(kStageTimeoutMs)) {
+            ESP_LOGW(TAG, "WIFI_RESET_FAILED: station still connected");
+            return false;
         }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    return true;
+}
+
+void RetryAfter(const char* stage, unsigned& delay_ms) {
+    ESP_LOGW(TAG, "NETWORK_RETRY: stage=%s in=%u ms", stage, delay_ms);
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    delay_ms = std::min(delay_ms * 2, kRetryMaxMs);
+}
+
+void WaitForLinkLoss() {
+    while (NetworkAvailable()) {
+        uint32_t events = 0;
+        xTaskNotifyWait(0, UINT32_MAX, &events, portMAX_DELAY);
+    }
+}
+
+void ParkTask() {
+    // SDK/lwIP callbacks retain the handle, even after a fatal initialization
+    // error. Never delete it and leave a dangling callback context.
+    for (;;) {
+        uint32_t events = 0;
+        xTaskNotifyWait(0, UINT32_MAX, &events, portMAX_DELAY);
     }
 }
 
 void NetworkTask(void*) {
-    const TaskHandle_t task = xTaskGetCurrentTaskHandle();
-    if (InitializeNetwork(task) && ConnectHotspot(task)) {
-        if (RunNetworkProbe()) {
-            if (RunOriginalOtaCheck()) RunOriginalWebsocketHandshake();
-        }
+    network_task = xTaskGetCurrentTaskHandle();
+    if (!InitializeNetwork(network_task)) {
+        ParkTask();
+        return;
     }
-    // Callbacks retain this handle, including a possibly late lwIP init callback.
-    // Keep the task alive and blocked, so a timeout cannot leave a dangling handle.
+    if (configured_ssid[0] == '\0') {
+        ESP_LOGW(TAG, "WIFI_NOT_CONFIGURED: edit ports/bouffalo/wifi_config.h and rebuild");
+        ParkTask();
+        return;
+    }
+    bool need_address = true, reset_station = false;
+    bool probe_ready = false, ota_ready = false;
+    TickType_t last_ota = 0;
+    unsigned wifi_delay = kRetryFirstMs, service_delay = kRetryFirstMs;
     for (;;) {
-        uint32_t events = 0;
-        xTaskNotifyWait(0, UINT32_MAX, &events, portMAX_DELAY);
-        if ((events & (kDisconnected | kLostIpv4)) != 0) {
-            ESP_LOGW(TAG, "WIFI_OFFLINE: no automatic retry in this step; reset to reconnect");
+        if (need_address) {
+            if (parameters_rejected) {
+                ESP_LOGW(TAG, "WIFI_RETRY_STOPPED: invalid parameters; fix wifi_config.h and rebuild");
+                ParkTask();
+                return;
+            }
+            if (reset_station && !ResetStation()) {
+                RetryAfter("Wi-Fi cleanup", wifi_delay);
+                continue;
+            }
+            const auto result = ConnectHotspot();
+            if (result == ConnectResult::BadParameters) {
+                ESP_LOGW(TAG, "WIFI_RETRY_STOPPED: invalid parameters; fix wifi_config.h and rebuild");
+                ParkTask();
+                return;
+            }
+            if (result != ConnectResult::Ready) {
+                reset_station = true;
+                RetryAfter("Wi-Fi association/DHCP", wifi_delay);
+                continue;
+            }
+            need_address = false;
+            reset_station = true;
+            probe_ready = ota_ready = false;
+            wifi_delay = service_delay = kRetryFirstMs;
         }
+        if (!NetworkAvailable()) {
+            ESP_LOGW(TAG, "WIFI_OFFLINE: old audio/session stopped; reconnecting hotspot");
+            need_address = true;
+            RetryAfter("Wi-Fi lost", wifi_delay);
+            continue;
+        }
+        // Keep a healthy Wi-Fi connection when only the Internet/server fails.
+        // Refresh OTA credentials no more than once a minute on session retries.
+        if (!probe_ready)
+            probe_ready = RunNetworkProbe();
+        if (probe_ready && NetworkAvailable() &&
+            (!ota_ready || xTaskGetTickCount() - last_ota >= pdMS_TO_TICKS(60000))) {
+            ota_ready = RunOriginalOtaCheck();
+            last_ota = xTaskGetTickCount();
+        }
+        if (probe_ready && ota_ready && NetworkAvailable()) {
+            const TickType_t session_started = xTaskGetTickCount();
+            const bool complete = RunOriginalWebsocketHandshake(0, NetworkAvailable);
+            if (xTaskGetTickCount() - session_started >= pdMS_TO_TICKS(60000))
+                service_delay = kRetryFirstMs;
+            if (complete) {
+                // Finite debug mode finishes normally. Do not start it repeatedly.
+                WaitForLinkLoss();
+            }
+        }
+        if (!NetworkAvailable())
+            continue;
+        RetryAfter(probe_ready ? (ota_ready ? "server session" : "OTA/activation") :
+                   "DNS/time/HTTPS", service_delay);
     }
 }
+
 }  // namespace
 
 bool StartWifiInitialization(const char* ssid, const char* password) {

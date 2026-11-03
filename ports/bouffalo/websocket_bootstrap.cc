@@ -33,11 +33,15 @@ struct ReplyState {
 };
 }  // namespace
 
-bool RunOriginalWebsocketHandshake(unsigned max_rounds) {
+bool RunOriginalWebsocketHandshake(unsigned max_rounds, bool (*network_available)()) {
     // Static lifetime: the original protocol retains its callbacks after startup.
     static AudioService audio;
     static ReplyState reply;
     static WebsocketProtocol protocol;
+    reply.active = false;
+    reply.ended = false;
+    reply.failure = nullptr;
+    const auto online = [&] { return !network_available || network_available(); };
     if (Settings("websocket").GetString("url").empty()) {
         ESP_LOGW("WS", "ORIGINAL_WS_SKIPPED: OTA supplied no WebSocket URL");
         return false;
@@ -60,9 +64,9 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds) {
     const auto close_session = [&] {
         reply.active = false;
         reply.closing = true;
-        protocol.CloseAudioChannel(true);
+        protocol.CloseAudioChannel(online());
         reply.closing = false;
-        ESP_LOGI("WS", "WS_SESSION_RELEASED: socket and receiver released; reset test is ready");
+        ESP_LOGI("WS", "WS_SESSION_RELEASED: socket and receiver released");
         MemoryDiagnosticsStage("after_ws_session_close");
     };
     protocol.OnIncomingAudio([](std::unique_ptr<AudioStreamPacket> packet) {
@@ -146,10 +150,14 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds) {
     const unsigned limit = max_rounds ? max_rounds : 1;
 #endif
     for (;;) {
+        if (!online()) {
+            close_session();
+            return false;
+        }
 #if XIAOZHI_VOICE_INPUT_TEST
         VoiceInputSession input(audio, codec);
         if (!input.Prepare()) {
-            ESP_LOGE("VOICE", "VOICE_INPUT_NOT_READY: reset to retry");
+            ESP_LOGE("VOICE", "VOICE_INPUT_NOT_READY: returning to network owner");
             close_session();
             return false;
         }
@@ -158,7 +166,7 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds) {
             const TickType_t connect_started = xTaskGetTickCount();
             if (!protocol.Start() || !protocol.OpenAudioChannel()) {
                 protocol.CloseAudioChannel(false);
-                ESP_LOGW("WS", "ORIGINAL_WS_NOT_READY: reset to retry");
+                ESP_LOGW("WS", "ORIGINAL_WS_NOT_READY: returning to network owner");
                 return false;
             }
             ESP_LOGI("WS", "ORIGINAL_WS_OK: authenticated; server hello received; "
@@ -178,9 +186,17 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds) {
         size_t sent = 0, sent_bytes = 0;
         bool listen_started = false;
         std::vector<int16_t> pending_frame;
+        if (!online()) {
+            close_session();
+            return false;
+        }
         if (!input.StartCapture())
             reply.Fail("capture worker start failed");
         for (;;) {
+            if (!online()) {
+                reply.Fail("Wi-Fi link/IP lost while listening; interrupted audio discarded");
+                break;
+            }
             if (input.Failure() || audio.HasEncodingError()) {
                 reply.Fail(input.Failure() ? input.Failure() : "voice encoder/send queue failed");
                 break;
@@ -264,6 +280,10 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds) {
         reply.last_packet = started;
         bool ok = false;
         for (;;) {
+            if (!online()) {
+                reply.Fail("Wi-Fi link/IP lost during reply");
+                break;
+            }
             if (reply.failure.load() || (!reply.ended && !protocol.Heartbeat()))
                 break;
             if (audio.HasPlaybackError()) {
@@ -298,7 +318,7 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds) {
         vTaskDelay(pdMS_TO_TICKS(20));  // Reclaim dynamic playback stacks before another round.
         if (!ok) {
             close_session();
-            ESP_LOGE("Audio", "AUDIO_REPLY_FAILED: %s; reset to retry",
+            ESP_LOGE("Audio", "AUDIO_REPLY_FAILED: %s; returning to network owner",
                      reply.failure.load() ? reply.failure.load() : "connection or playback failed");
             return false;
         }

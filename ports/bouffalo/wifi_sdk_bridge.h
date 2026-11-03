@@ -26,6 +26,10 @@ int WifiSdkStartManager(void);
 // Submit one DHCP connection attempt with PMF optional and auto-reconnect disabled.
 int WifiSdkConnect(const char* ssid, const char* password);
 
+// Owner-task cleanup before retrying; already disconnected counts as success.
+int WifiSdkDisconnect(void);
+int WifiSdkStationConnected(void);
+
 int WifiSdkGetStationMac(uint8_t mac[6]);
 
 #ifdef __cplusplus

@@ -97,6 +97,17 @@ int WifiSdkConnect(const char* ssid, const char* password) {
     return result == 0 ? wifi_mgmr_sta_connect(&params) : result;
 }
 
+int WifiSdkStationConnected(void) {
+    return wifi_mgmr_sta_state_get() == 1;
+}
+
+int WifiSdkDisconnect(void) {
+    if (!WifiSdkStationConnected()) {
+        return 0;
+    }
+    return wifi_sta_disconnect();
+}
+
 int WifiSdkGetStationMac(uint8_t mac[6]) {
     return mac == NULL ? -1 : wifi_mgmr_sta_mac_get(mac);
 }

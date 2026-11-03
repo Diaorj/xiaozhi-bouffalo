@@ -216,7 +216,7 @@ int main(int argc,char** argv) {
                 extra=['-DXIAOZHI_VOICE_INPUT_TEST=1']
             subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-pthread','-DXIAOZHI_PLATFORM_BOUFFALO=1','-DXIAOZHI_AUDIO_PLATFORM_BACKEND=1',*extra,*['-I'+str(x) for x in include],*[str(x) for x in sources],'-lm','-o',str(work/'check')],check=True)
             if voice_tests:
-                for case in [0,3,20,21,22,23,24,25,26,27,30,31,32,33]:
+                for case in [0,3,20,21,22,23,24,25,26,27,30,31,32,33,34,35,36,37,38,39]:
                     with self.subTest(case=case):
                         result=subprocess.run([str(work/'check'),str(case)],capture_output=True,text=True,timeout=25)
                         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
@@ -235,7 +235,7 @@ int main(int argc,char** argv) {
                         if case==30:
                             self.assertEqual(result.stdout.count('AUDIO_REPLY_DONE:'),20)
                             self.assertEqual(result.stdout.count('AUTO_LISTEN_RESUME:'),19)
-                        if case in (25,26,27,33):
+                        if case in (25,26,27,33,34,35):
                             self.assertIn('VOICE_STREAM_FAILED:',result.stdout)
                 return
             for case in range(18):

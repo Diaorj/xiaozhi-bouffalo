@@ -28,6 +28,7 @@ BaseType_t xTaskNotify(TaskHandle_t, uint32_t, int);
 BaseType_t xTaskNotifyWait(uint32_t, uint32_t, uint32_t*, TickType_t);
 TickType_t xTaskGetTickCount(void);
 TaskHandle_t xTaskGetCurrentTaskHandle(void);
+void vTaskDelay(TickType_t);
 BaseType_t xTaskCreate(void (*)(void*), const char*, unsigned, void*, unsigned, TaskHandle_t*);
 """
 SDK = r"""
@@ -59,6 +60,8 @@ typedef struct {
     int timeout_ms;
 } wifi_mgmr_sta_connect_params_t;
 int wifi_mgmr_sta_autoconnect_disable(void);
+int wifi_sta_disconnect(void);
+int wifi_mgmr_sta_state_get(void);
 int wifi_mgmr_sta_mac_get(uint8_t mac[6]);
 int wifi_mgmr_sta_connect(const wifi_mgmr_sta_connect_params_t*);
 typedef struct { const char* text; } ip4_addr_t;
@@ -95,6 +98,7 @@ HARNESS = r"""
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 #include "wifi_init.h"
 extern "C" {
 #include "task.h"
@@ -102,10 +106,9 @@ extern "C" {
 }
 struct TaskBlocked {};
 static int mode, driver_calls, manager_calls, creates, waits, connect_calls, disables, probes;
-static bool in_event_callback, monitor_delivered;
-bool RunNetworkProbe() { assert(!in_event_callback); ++probes; return true; }
-bool RunOriginalWebsocketHandshake(unsigned) { return true; }
-bool RunOriginalOtaCheck() { assert(!in_event_callback); return true; }
+static int ota_calls, wss_calls, disconnect_calls, info_waits;
+static bool in_event_callback, monitor_delivered, station_connected;
+static std::vector<unsigned> delays;
 static TickType_t ticks;
 static uint32_t pending;
 static async_event_cb listener;
@@ -118,9 +121,31 @@ static netif station{nullptr, 1, 1, {"192.168.1.23"}, {"255.255.255.0"},
                      {"192.168.1.1"}, 6, {0, 1, 2, 3, 4, 5}};
 static void Emit(unsigned code) {
     mock_event event{code};
+    if (code == CODE_WIFI_ON_DISCONNECT) station_connected = false;
+    if (code == CODE_WIFI_ON_CONNECTED) station_connected = true;
     in_event_callback = true;
     listener(&event, listener_context);
     in_event_callback = false;
+}
+bool RunNetworkProbe() {
+    assert(!in_event_callback); ++probes;
+    return mode != 32 || probes > 1;
+}
+bool RunOriginalOtaCheck() {
+    assert(!in_event_callback); ++ota_calls;
+    return mode != 33 || ota_calls > 1;
+}
+bool RunOriginalWebsocketHandshake(unsigned rounds, bool (*available)()) {
+    assert(!in_event_callback && rounds == 0 && available && available());
+    ++wss_calls;
+    if (mode == 30 && wss_calls == 1) {
+        Emit(CODE_WIFI_ON_LOST_IP);
+        assert(!available());
+        return false; // Real session cleanup is covered by the audio harness.
+    }
+    if (mode == 31 && wss_calls == 1) return false;
+    if (mode == 39 && wss_calls < 7) return false;
+    return true;
 }
 extern "C" {
 struct netif* netif_list = &station;
@@ -133,17 +158,37 @@ BaseType_t xTaskNotify(TaskHandle_t task, uint32_t bit, int action) {
 }
 BaseType_t xTaskNotifyWait(uint32_t enter, uint32_t clear, uint32_t* bits, TickType_t timeout) {
     assert(enter == 0 && !in_event_callback);
-    if (timeout == portMAX_DELAY) {
-        if (mode != 18 || monitor_delivered) throw TaskBlocked{};
-        monitor_delivered = true;
-        Emit(CODE_WIFI_ON_DISCONNECT);
-    } else {
-        ++waits;
+    if (timeout == portMAX_DELAY && !pending) {
+        if ((mode == 18 && !monitor_delivered) || (mode == 38 && wss_calls < 20)) {
+            monitor_delivered = true;
+            Emit(CODE_WIFI_ON_DISCONNECT);
+        } else throw TaskBlocked{};
+    } else if (timeout > 0 && timeout != portMAX_DELAY) ++waits;
+    if (mode == 37 && info_callback && ++info_waits == 2) {
+        auto callback = info_callback; info_callback = nullptr;
+        callback(info_context);
     }
     *bits = pending;
     pending &= ~clear;
     ticks += *bits ? 1 : timeout;
     return *bits ? pdTRUE : pdFALSE;
+}
+void vTaskDelay(TickType_t delay) {
+    assert(!in_event_callback);
+    ticks += delay;
+    if (delay < 3000) return; // station-disconnect polling
+    delays.push_back(delay);
+    // Bound intentionally permanent-failure tests without changing production code.
+    if (delays.size() >= (mode == 34 ? 8u : 3u) &&
+        (mode == 10 || mode == 11 || mode == 12 || mode == 13 || mode == 15 ||
+         mode == 16 || mode == 17 || mode == 21 || mode == 25 || mode == 26 ||
+         mode == 27 || mode == 34 || mode == 36 || mode == 41)) throw TaskBlocked{};
+    assert(delays.size() <= 25);
+    if (mode == 20 && info_callback) { // A timed-out address check arrives in backoff.
+        auto callback = info_callback; info_callback = nullptr;
+        callback(info_context);
+    }
+    if (mode == 40) Emit(CODE_WIFI_ON_PARAMS_ERROR);
 }
 BaseType_t xTaskCreate(void (*entry)(void*), const char*, unsigned, void* context,
                       unsigned, TaskHandle_t*) {
@@ -153,32 +198,43 @@ BaseType_t xTaskCreate(void (*entry)(void*), const char*, unsigned, void* contex
     return pdPASS;
 }
 int wifi_mgmr_sta_mac_get(uint8_t mac[6]) { (void)mac; return -1; }
+int wifi_mgmr_sta_state_get() { assert(!in_event_callback); return station_connected; }
+int wifi_sta_disconnect() {
+    assert(!in_event_callback && station_connected);
+    ++disconnect_calls;
+    if (mode == 35 && disconnect_calls == 1) return -1;
+    if (mode != 36) Emit(CODE_WIFI_ON_DISCONNECT);
+    return 0;
+}
 int wifi_mgmr_sta_autoconnect_disable() {
-    assert(!in_event_callback);
-    ++disables;
+    assert(!in_event_callback); ++disables;
     return mode == 21 ? -1 : 0;
 }
 int wifi_mgmr_sta_connect(const wifi_mgmr_sta_connect_params_t* params) {
-    assert(!in_event_callback);
+    assert(!in_event_callback && !station_connected);
     ++connect_calls;
     assert(params->pmf_cfg == 1 && params->use_dhcp == 1);
     assert(params->timeout_ms == 30000 && params->dhcp_timeout_event_only == 1);
-    if (mode == 22) {
-        assert(params->ssid_len == 32 && params->key_len == 64);
-    } else {
+    if (mode == 22) assert(params->ssid_len == 32 && params->key_len == 64);
+    else {
         assert(params->ssid_len == 9 && params->key_len == 8);
         assert(std::memcmp(params->ssid, "test-ssid", 9) == 0);
         assert(std::memcmp(params->key, "test-key", 8) == 0);
     }
     if (mode == 10) return -1;
-    if (mode == 11) return 0;
-    if (mode == 13) Emit(CODE_WIFI_ON_GOT_IP_TIMEOUT);
+    if (mode == 11 || mode == 40) return 0;
+    if (mode == 13 || (mode == 29 && connect_calls == 1)) Emit(CODE_WIFI_ON_GOT_IP_TIMEOUT);
     else if (mode == 14) Emit(CODE_WIFI_ON_PARAMS_ERROR);
-    else if (mode == 15) Emit(CODE_WIFI_ON_DISCONNECT);
+    else if (mode == 15 || mode == 34 || (mode == 28 && connect_calls == 1))
+        Emit(CODE_WIFI_ON_DISCONNECT);
     else if (mode == 26) Emit(CODE_WIFI_ON_LOST_IP);
-    else {
+    else if (mode == 41) {
+        Emit(CODE_WIFI_ON_LOST_IP);
+        Emit(CODE_WIFI_ON_GOT_IP); // A stale/coalesced IP event must not win over link loss.
+    } else {
         Emit(CODE_WIFI_ON_CONNECTED);
-        if (mode != 12) Emit(CODE_WIFI_ON_GOT_IP);
+        if (mode != 12 && mode != 36 && !(mode == 35 && connect_calls == 1))
+            Emit(CODE_WIFI_ON_GOT_IP);
     }
     return 0;
 }
@@ -193,54 +249,44 @@ int tcpip_try_callback(void (*callback)(void*), void* context) {
     if (mode == 17) netif_list = nullptr;
     if (mode == 27) Emit(CODE_WIFI_ON_GOT_IP_TIMEOUT);
     if (mode == 25) station.link = 0;
-    if (mode == 20) {
+    if ((mode == 20 && connect_calls == 1) || mode == 37) {
         info_callback = callback;
         info_context = context;
-    } else {
-        callback(context);
-    }
+        if (mode == 37) Emit(CODE_WIFI_ON_CONNECTED);
+    } else callback(context);
     return ERR_OK;
 }
 int rfparam_init(unsigned, void*, unsigned) { return mode == 1 ? -1 : 0; }
 void tcpip_init(void (*callback)(void*), void* context) {
     tcpip_callback = callback;
     tcpip_context = context;
-    if (mode != 2) callback(context); // readiness may arrive before the task waits
+    if (mode != 2) callback(context);
 }
 int async_register_event_filter(uintptr_t type, async_event_cb callback, void* context) {
     assert(type == EV_WIFI);
     if (mode == 3) return -1;
-    listener = callback;
-    listener_context = context;
+    listener = callback; listener_context = context;
     return 0;
 }
 void wifi_task_create() { ++driver_calls; }
 int fhost_init() {
     assert(waits == 1 && listener);
     if (mode == 4) return -1;
-    listener(nullptr, listener_context); // SDK can deliver a null event on removal
-    mock_event ignored{99};
-    listener(&ignored, listener_context);
-    if (mode != 5) {
-        mock_event ready{CODE_WIFI_ON_INIT_DONE};
-        listener(&ready, listener_context);
-    }
+    listener(nullptr, listener_context);
+    mock_event ignored{99}; listener(&ignored, listener_context);
+    if (mode != 5) Emit(CODE_WIFI_ON_INIT_DONE);
     return 0;
 }
 int wifi_mgmr_task_start() {
     ++manager_calls;
     assert(waits == 2 && driver_calls == 1);
     if (mode == 6) return -1;
-    if (mode != 7) {
-        mock_event ready{CODE_WIFI_ON_MGMR_DONE};
-        listener(&ready, listener_context);
-    }
+    if (mode != 7) Emit(CODE_WIFI_ON_MGMR_DONE);
     return 0;
 }
 }
 int main(int argc, char** argv) {
-    assert(argc == 2);
-    mode = std::atoi(argv[1]);
+    assert(argc == 2); mode = std::atoi(argv[1]);
     bool started;
     const bool invalid = mode == 19 || mode == 23 || mode == 24;
     if (mode == 19) started = StartWifiInitialization(std::string(33, 's').c_str(), "test-key");
@@ -252,21 +298,43 @@ int main(int argc, char** argv) {
     else started = StartWifiInitialization();
     assert(started == (mode != 8 && !invalid));
     if (mode != 8 && !invalid) {
-        assert(StartWifiInitialization());
-        assert(creates == 1); // a second call must not reinitialize or reconnect
+        assert(StartWifiInitialization()); assert(creates == 1);
     }
     if (invalid) assert(creates == 0);
     if (mode >= 1 && mode <= 5) assert(manager_calls == 0);
-    if (mode == 0) assert(driver_calls == 1 && manager_calls == 1 && waits == 3);
-    if (mode >= 9 && !invalid) {
-        assert(disables == 1);
-        assert(connect_calls == (mode == 21 ? 0 : 1));
-    } else assert(connect_calls == 0);
-    if (mode == 2) tcpip_callback(tcpip_context); // late callback keeps a valid task owner
-    if (mode == 20) info_callback(info_context); // late address callback also remains safe
-    assert(probes == ((mode == 9 || mode == 18 || mode == 22) ? 1 : 0));
+    if (mode == 0) assert(driver_calls == 1 && manager_calls == 1);
+    if (mode >= 9 && !invalid) assert(driver_calls == 1 && manager_calls == 1);
+    if (mode == 2) tcpip_callback(tcpip_context);
+    if (mode == 14) assert(connect_calls == 1 && delays.empty());
+    if (mode == 28 || mode == 29 || mode == 20) {
+        assert(connect_calls == 2 && probes == 1 && wss_calls == 1);
+        assert(delays == std::vector<unsigned>{3000});
+    }
+    if (mode == 18 || mode == 30) assert(connect_calls == 2 && probes == 2 && wss_calls == 2);
+    if (mode == 31) assert(connect_calls == 1 && probes == 1 && ota_calls == 1 && wss_calls == 2);
+    if (mode == 32) assert(connect_calls == 1 && probes == 2 && wss_calls == 1);
+    if (mode == 33) assert(connect_calls == 1 && probes == 1 && ota_calls == 2 && wss_calls == 1);
+    if (mode == 34) {
+        assert(connect_calls == 8 && probes == 0);
+        assert((delays == std::vector<unsigned>{3000,6000,12000,24000,30000,30000,30000,30000}));
+    }
+    if (mode == 35) assert(connect_calls == 2 && disconnect_calls == 2 && probes == 1);
+    if (mode == 36) assert(connect_calls == 1 && probes == 0);
+    if (mode == 38) assert(connect_calls == 20 && probes == 20 && wss_calls == 20);
+    if (mode == 39) assert(connect_calls == 1 && probes == 1 && ota_calls == 2 && wss_calls == 7);
+    if (mode == 40) assert(connect_calls == 1 && probes == 0 && delays.size() == 1);
+    if (mode == 41) assert(probes == 0);
+    if (mode == 10 || mode == 11 || mode == 12 || mode == 13 || mode == 15 || mode == 16 ||
+        mode == 17 || mode == 21 || mode == 25 || mode == 26 || mode == 27 || mode == 41) {
+        assert(delays.size() == 3 && probes == 0);
+        assert(connect_calls == (mode == 21 ? 0 : 3));
+    }
+    if (mode == 9 || mode == 22 || mode == 37)
+        assert(connect_calls == 1 && probes == 1 && wss_calls == 1 && delays.empty());
+    if (mode >= 9 && !invalid) assert(disables == (mode == 21 ? 3 : connect_calls));
 }
 """
+
 
 
 class WifiInitializationTests(unittest.TestCase):
@@ -294,7 +362,7 @@ class WifiInitializationTests(unittest.TestCase):
             subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror", *includes,
                             str(PORT / "wifi_init.cc"), str(work / "check.cc"),
                             str(work / "bridge.o"), "-o", str(executable)], check=True)
-            for mode in range(28):
+            for mode in range(42):
                 with self.subTest(mode=mode):
                     result = subprocess.run([str(executable), str(mode)], check=True,
                                             capture_output=True, text=True, timeout=5)
@@ -302,9 +370,13 @@ class WifiInitializationTests(unittest.TestCase):
                     init_ok = mode == 0 or (mode >= 9 and not invalid)
                     self.assertEqual("WIFI_INIT_OK:" in result.stdout, init_ok)
                     self.assertEqual("WIFI_INIT_FAILED:" in result.stdout, not init_ok)
-                    ready = mode in (9, 18, 22)
+                    ready = mode in (9, 18, 20, 22, 28, 29, 30, 31, 32, 33, 35, 37, 38, 39)
                     self.assertEqual("WIFI_READY:" in result.stdout, ready)
-                    self.assertEqual("WIFI_OFFLINE:" in result.stdout, mode == 18)
+                    self.assertEqual("WIFI_OFFLINE:" in result.stdout, mode in (18, 30, 38))
+                    if mode == 34:
+                        self.assertIn("in=30000 ms", result.stdout)
+                    if mode in (14, 40):
+                        self.assertIn("WIFI_RETRY_STOPPED:", result.stdout)
                     if mode == 11:
                         self.assertIn("timeout waiting for association", result.stdout)
                     if mode == 12:

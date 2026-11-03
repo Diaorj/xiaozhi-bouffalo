@@ -5,7 +5,8 @@ def customize(t):
     t=t[:a]+r'''
 static std::set<void*> states,buffers;
 static int state_allocations=0,state_frees=0,rounds=0,cloud_starts=0;
-static std::atomic<bool> mic{false},force_disconnect{false};
+static std::atomic<bool> mic{false},force_disconnect{false},wifi_down{false};
+static bool WifiAvailable() {return !wifi_down.load();}
 static std::atomic<unsigned> captured{0};
 static unsigned uploaded=0,decoded_input=0;
 static int input_peak=0;
@@ -47,6 +48,8 @@ extern "C" int AudioDmaWorkerWait() {
 '''+t[b:]
     t=t.replace('extern "C" int AudioSdkOpen(unsigned volume) { assert(volume==15);',
                 'extern "C" int AudioSdkOpen(unsigned volume) { assert(!mic && !capture_pending && !encoder_pending && states.size()==1); assert(volume==15);')
+    t=t.replace('extern "C" int AudioSdkWrite(const int16_t* pcm,size_t n) {',
+                'extern "C" int AudioSdkWrite(const int16_t* pcm,size_t n) { if(test_case==36)wifi_down=true;')
     t=t.replace('extern "C" int AudioSdkRecordOpen() { return -1; }',r'''extern "C" int AudioSdkRecordOpen() {
     if(test_case==20)return -1;
     assert(!mic);captured=0;mic=true;return 0;
@@ -59,6 +62,7 @@ extern "C" int AudioDmaWorkerWait() {
     bool voice=offset>=9600 && (offset<25600 || test_case==31);
     if(test_case==32)voice=(offset>=6400 && offset<7680) || (offset>=48000 && offset<64000);
     if(test_case==33) {voice=false;if(offset>=48000)force_disconnect=true;}
+    if(test_case==34) {voice=false;if(offset>=48000)wifi_down=true;}
     for(size_t i=0;i<n;i++)pcm[i]=voice?int16_t(9000*std::sin((offset+i)*6.283185307*440/16000)):0;
     captured+=n;return n;
 }''')
@@ -71,6 +75,7 @@ extern "C" int AudioDmaWorkerWait() {
             assert(captured>=960);
             if(uploaded==0)assert(mic); // The first packet must be sent while recording.
             if(test_case==25 && uploaded==3)return -1;
+            if(test_case==35 && uploaded==3)wifi_down=true;
             if(test_case==26 && uploaded==3)
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             if(test_case==27 && uploaded==3)queue(t,frame("",0x88));
@@ -107,8 +112,26 @@ extern "C" int AudioDmaWorkerWait() {
 int main(int argc,char** argv) {
     setbuf(stdout,nullptr);assert(argc==2);test_case=std::atoi(argv[1]);
     std::atexit([] {assert(state_allocations==state_frees && states.empty() && buffers.empty() && !mic && !capture_pending && !encoder_pending);});
+    if(test_case==37 || test_case==38) {
+        const int failing=test_case==37?34:36;
+        for(int i=0;i<5;i++) {
+            test_case=failing;wifi_down=false;closed_audio=0;
+            assert(!RunOriginalWebsocketHandshake(1,WifiAvailable));
+            assert(live_tls==0 && !mic && !capture_pending && !encoder_pending && buffers.empty());
+            for(auto& thread:threads)if(thread.joinable())thread.join();
+            if(server_decoder) {opus_decoder_destroy(server_decoder);server_decoder=nullptr;}
+            test_case=0;wifi_down=false;closed_audio=0;
+            assert(RunOriginalWebsocketHandshake(1,WifiAvailable));
+            assert(live_tls==0 && !mic && !capture_pending && !encoder_pending && buffers.empty());
+            for(auto& thread:threads)if(thread.joinable())thread.join();
+        }
+        assert(requests==10 && finished_audio>=5);
+        assert(state_allocations==state_frees+1 && states.size()==1);
+        puts("VOICE_TEST_OK");return 0;
+    }
+    if(test_case==39)wifi_down=true;
     const bool expected=test_case==0 || test_case==30 || test_case==31 || test_case==32;
-    const bool ok=RunOriginalWebsocketHandshake(test_case==30?20:1);
+    const bool ok=RunOriginalWebsocketHandshake(test_case==30?20:1,WifiAvailable);
     assert(ok==expected);
     assert(live_tls==0 && !mic && !capture_pending && !encoder_pending && buffers.empty());
     for(auto& thread:threads)thread.join();
@@ -119,8 +142,9 @@ int main(int argc,char** argv) {
         assert(requests==1 && close_count==1); // One authenticated connection across all rounds.
         assert(state_allocations==n+1 && state_frees==n); // One retained decoder, no growing state.
     }
-    if(test_case>=20 && test_case!=30 && test_case!=31 && test_case!=32)assert(audio_tasks==0);
+    if(test_case>=20 && test_case!=30 && test_case!=31 && test_case!=32 && test_case!=36)assert(audio_tasks==0);
     if(test_case==33)assert(cloud_starts==0 && uploaded==0); // Quiet waiting never asks the server.
+    if(test_case==34 || test_case==39)assert(cloud_starts==0 && uploaded==0);
     puts("VOICE_TEST_OK");
 }
 '''
