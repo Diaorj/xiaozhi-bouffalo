@@ -3,6 +3,7 @@
 #include <cstring>
 #ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
 #include "memory_diagnostics.h"
+#include "audio_encoder_worker.h"
 #endif
 
 #ifndef XIAOZHI_AUDIO_PLATFORM_BACKEND
@@ -237,22 +238,22 @@ bool AudioService::StartEncoding(std::unique_ptr<AudioEncoder> encoder) {
     playback_accepting_ = false;
     service_stopped_ = false;
     xEventGroupClearBits(event_group_, kDecoderStopped);
-    // The verified first-frame stack use was ~22 KiB. Reserve 32 KiB while
-    // capturing/uploading; this worker is stopped before playback starts.
-    if (xTaskCreate(
+    // The platform worker keeps a reusable internal-WRAM stack across rounds.
+    // This avoids requiring a fresh contiguous 32 KiB OCRAM allocation after TTS.
+    if (AudioEncoderWorkerStart(
             [](void* arg) {
                 auto* self = static_cast<AudioService*>(arg);
                 self->OpusCodecTask();
                 MemoryDiagnosticsStage("voice_encoder_done");
                 xEventGroupSetBits(self->event_group_, kDecoderStopped);
-                vTaskDelete(nullptr);
             },
-            "opus_encode", 8192, this, 6, &opus_codec_task_handle_) != pdPASS) {
+            this, &opus_codec_task_handle_) != 0) {
         opus_codec_task_handle_ = nullptr;
         Stop();
         return false;
     }
-    ESP_LOGI(TAG, "AUDIO_ENCODER_READY: original encode/send queues; stack=32768 bytes");
+    platform_encoder_job_ = true;
+    ESP_LOGI(TAG, "AUDIO_ENCODER_READY: original queues; reusable WRAM stack=32768 bytes");
     return true;
 }
 
@@ -315,6 +316,10 @@ void AudioService::Stop() {
                           (opus_codec_task_handle_ ? kDecoderStopped : 0);
     if (stopped)
         xEventGroupWaitBits(event_group_, stopped, pdFALSE, pdTRUE, portMAX_DELAY);
+    if (platform_encoder_job_) {
+        AudioEncoderWorkerWait();
+        platform_encoder_job_ = false;
+    }
     audio_output_task_handle_ = nullptr;
     opus_codec_task_handle_ = nullptr;
     platform_encoder_.reset();

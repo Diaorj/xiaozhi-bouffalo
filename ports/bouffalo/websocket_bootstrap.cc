@@ -33,7 +33,7 @@ struct ReplyState {
 };
 }  // namespace
 
-bool RunOriginalWebsocketHandshake() {
+bool RunOriginalWebsocketHandshake(unsigned max_rounds) {
     // Static lifetime: the original protocol retains its callbacks after startup.
     static AudioService audio;
     static ReplyState reply;
@@ -54,10 +54,9 @@ bool RunOriginalWebsocketHandshake() {
         }
         if (!reply.ended)
             reply.Fail("connection closed before TTS stop");
-        ESP_LOGW("WS", "ORIGINAL_WS_CLOSED: reset to reconnect");
+        ESP_LOGW("WS", "ORIGINAL_WS_CLOSED: conversation connection ended");
     });
-    // This stage runs exactly one reply. Do not leave an idle server session
-    // behind after it finishes; close from the owner and join all callbacks.
+    // The owner closes/joins the session on a terminal error or finite test exit.
     const auto close_session = [&] {
         reply.active = false;
         reply.closing = true;
@@ -120,12 +119,18 @@ bool RunOriginalWebsocketHandshake() {
             ESP_LOGE("WS", "SERVER_REPLY_ERROR");
         }
     });
+    auto* codec = Board::GetInstance().GetAudioCodec();
+    audio.Initialize(codec);
+    bool decoder_ready = false;
     const auto start_playback = [&] {
-        MemoryDiagnosticsStage("before_opus_state");
-        auto decoder = CreateBouffaloOpusDecoder();
-        if (!decoder)
-            return false;
-        audio.Initialize(Board::GetInstance().GetAudioCodec(), std::move(decoder));
+        if (!decoder_ready) {
+            MemoryDiagnosticsStage("before_opus_state");
+            auto decoder = CreateBouffaloOpusDecoder();
+            if (!decoder)
+                return false;
+            audio.Initialize(codec, std::move(decoder));
+            decoder_ready = true;
+        }
         audio.Start();
         if (!audio.IsRunning()) {
             ESP_LOGE("WS", "AUDIO_WORKER_START_FAILED");
@@ -134,158 +139,177 @@ bool RunOriginalWebsocketHandshake() {
         MemoryDiagnosticsStage("audio_service_tasks_created");
         return true;
     };
-#if XIAOZHI_VOICE_INPUT_TEST
-    auto* codec = Board::GetInstance().GetAudioCodec();
-    audio.Initialize(codec);
-    VoiceInputSession input(audio, codec);
-    if (!input.Prepare()) {
-        ESP_LOGE("VOICE", "VOICE_INPUT_NOT_READY: reset to retry");
-        return false;
-    }
-#endif
-    const TickType_t connect_started = xTaskGetTickCount();
-    if (!protocol.Start() || !protocol.OpenAudioChannel()) {
-        protocol.CloseAudioChannel(false);
-        ESP_LOGW("WS", "ORIGINAL_WS_NOT_READY: reset to retry");
-        return false;
-    }
-    ESP_LOGI("WS", "ORIGINAL_WS_OK: authenticated; server hello received; "
-                   "rate=%d frame=%d ms connect_ms=%u",
-             protocol.server_sample_rate(), protocol.server_frame_duration(),
-             unsigned((xTaskGetTickCount() - connect_started) * portTICK_PERIOD_MS));
-#if !XIAOZHI_VOICE_INPUT_TEST
-    if (!start_playback()) {
-        close_session();
-        return false;
-    }
-#endif
-    reply.ended = false;
-    reply.failure = nullptr;
-    reply.packets = 0;
-    reply.json_messages = 0;
-    reply.tts_started = false;
-    reply.request_finished = 0;
-    const TickType_t started = xTaskGetTickCount();
-    reply.last_packet = started;
-    reply.active = true;
-#if XIAOZHI_VOICE_INPUT_TEST
-    protocol.SendStartListening(kListeningModeManualStop);
-    const TickType_t stream_started = xTaskGetTickCount();
-    TickType_t first_upload = 0;
-    size_t sent = 0, sent_bytes = 0;
-    if (!input.StartCapture())
-        reply.Fail("capture worker start failed");
-    ESP_LOGI("VOICE", "VOICE_STREAM_BEGIN: capture/encode/upload concurrently, 5 seconds");
-    for (;;) {
-        if (input.Failure() || audio.HasEncodingError()) {
-            reply.Fail(input.Failure() ? input.Failure() : "voice encoder/send queue failed");
-            break;
-        }
-        if (reply.failure.load() || !protocol.IsAudioChannelOpened()) {
-            reply.Fail("voice connection closed during capture");
-            break;
-        }
-        while (auto packet = audio.PopPacketFromSendQueue()) {
-            const size_t bytes = packet->payload.size();
-            if (!protocol.SendAudio(std::move(packet))) {
-                reply.Fail("voice upload failed");
-                break;
-            }
-            if (sent++ == 0) {
-                first_upload = xTaskGetTickCount();
-                ESP_LOGI("VOICE", "VOICE_FIRST_UPLOAD: from_recording_start_ms=%u",
-                         unsigned((first_upload - input.RecordingStartedAt()) * portTICK_PERIOD_MS));
-            }
-            sent_bytes += bytes;
-        }
-        if (reply.failure.load())
-            break;
-        if (input.CaptureDone() && audio.IsEncodingIdle()) {
-            if (input.Failure() || audio.HasEncodingError()) {
-                reply.Fail("voice capture/encode incomplete");
-                break;
-            }
-            if (sent == VoiceInputSession::kFrames)
-                break;
-            // The encoder may have published its last packet after our queue drain.
-            // Revisit the send queue instead of mistaking this race for missing audio.
-        }
-        if (xTaskGetTickCount() - stream_started > pdMS_TO_TICKS(10000)) {
-            reply.Fail("voice capture/upload timeout");
-            break;
-        }
-        // Sample arrival paces upload. No additional 60 ms delay per packet.
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    input.Stop();  // Join producer/encoder before reusing the DMA worker for output.
-    if (reply.failure.load()) {
-        ESP_LOGE("VOICE", "VOICE_STREAM_FAILED: %s; sent_packets=%u", reply.failure.load(),
-                 unsigned(sent));
-        close_session();
-        return false;
-    }
-    const TickType_t uploaded_at = xTaskGetTickCount();
-    ESP_LOGI("VOICE", "VOICE_TIMING: capture_ms=%u first_upload_ms=%u upload_tail_ms=%u total_ms=%u",
-             unsigned((input.RecordingEndedAt() - input.RecordingStartedAt()) * portTICK_PERIOD_MS),
-             unsigned((first_upload - input.RecordingStartedAt()) * portTICK_PERIOD_MS),
-             unsigned((uploaded_at - input.RecordingEndedAt()) * portTICK_PERIOD_MS),
-             unsigned((uploaded_at - stream_started) * portTICK_PERIOD_MS));
-    if (!start_playback()) {
-        close_session();
-        return false;
-    }
-    reply.request_finished = xTaskGetTickCount();
-    protocol.SendStopListening();
-    ESP_LOGI("VOICE", "VOICE_UPLOADED: packets=%u bytes=%u; waiting for recognition and reply",
-             unsigned(sent), unsigned(sent_bytes));
-    reply.last_packet = xTaskGetTickCount();
+    unsigned completed = 0;
+#if XIAOZHI_AUTO_CHAT && XIAOZHI_VOICE_INPUT_TEST
+    const unsigned limit = max_rounds;
 #else
-    // Official listen/detect accepts a short wake phrase, not an arbitrary question.
-    reply.request_finished = xTaskGetTickCount();
-    protocol.SendWakeWordDetected("你好小智");
-    ESP_LOGI("WS", "WAKE_GREETING_REQUESTED: standard short wake phrase; first audio timeout=30s");
+    const unsigned limit = max_rounds ? max_rounds : 1;
 #endif
-
-    bool ok = false;
     for (;;) {
-        if (reply.failure.load())
-            break;
-        if (audio.HasPlaybackError()) {
-            reply.Fail("decoder or speaker open/write failed");
-            break;
+#if XIAOZHI_VOICE_INPUT_TEST
+        VoiceInputSession input(audio, codec);
+        if (!input.Prepare()) {
+            ESP_LOGE("VOICE", "VOICE_INPUT_NOT_READY: reset to retry");
+            close_session();
+            return false;
         }
-        if (reply.ended && audio.IsPlaybackIdle()) {
-            ok = reply.packets > 0 && audio.FinishPlayback();
-            if (!ok)
-                reply.Fail(reply.packets ? "speaker DMA drain failed" : "TTS ended without audio");
-            break;
+#endif
+        if (completed == 0) {
+            const TickType_t connect_started = xTaskGetTickCount();
+            if (!protocol.Start() || !protocol.OpenAudioChannel()) {
+                protocol.CloseAudioChannel(false);
+                ESP_LOGW("WS", "ORIGINAL_WS_NOT_READY: reset to retry");
+                return false;
+            }
+            ESP_LOGI("WS", "ORIGINAL_WS_OK: authenticated; server hello received; "
+                           "rate=%d frame=%d ms connect_ms=%u",
+                     protocol.server_sample_rate(), protocol.server_frame_duration(),
+                     unsigned((xTaskGetTickCount() - connect_started) * portTICK_PERIOD_MS));
         }
-        const TickType_t now = xTaskGetTickCount();
-        if (now - started > pdMS_TO_TICKS(120000)) {
-            reply.Fail("reply total timeout");
-            break;
+        reply.ended = false;
+        reply.failure = nullptr;
+        reply.packets = 0;
+        reply.json_messages = 0;
+        reply.tts_started = false;
+        reply.request_finished = 0;
+        reply.active = true;
+#if XIAOZHI_VOICE_INPUT_TEST
+        TickType_t first_upload = 0;
+        size_t sent = 0, sent_bytes = 0;
+        bool listen_started = false;
+        std::vector<int16_t> pending_frame;
+        if (!input.StartCapture())
+            reply.Fail("capture worker start failed");
+        for (;;) {
+            if (input.Failure() || audio.HasEncodingError()) {
+                reply.Fail(input.Failure() ? input.Failure() : "voice encoder/send queue failed");
+                break;
+            }
+            if (reply.failure.load() || !protocol.Heartbeat() || !protocol.IsAudioChannelOpened()) {
+                reply.Fail("voice connection closed while listening");
+                break;
+            }
+            if (input.VoiceStarted() && !listen_started) {
+                protocol.SendStartListening(kListeningModeManualStop);
+                listen_started = true;
+            }
+            if (listen_started) {
+                if (pending_frame.empty())
+                    input.PopPcmFrame(pending_frame);
+                if (!pending_frame.empty())
+                    audio.PushPcmToEncodeQueue(std::move(pending_frame));
+                while (auto packet = audio.PopPacketFromSendQueue()) {
+                    const size_t bytes = packet->payload.size();
+                    if (!protocol.SendAudio(std::move(packet))) {
+                        reply.Fail("voice upload failed");
+                        break;
+                    }
+                    if (sent++ == 0) {
+                        first_upload = xTaskGetTickCount();
+                        ESP_LOGI("VOICE", "VOICE_FIRST_UPLOAD: from_voice_start_ms=%u",
+                                 unsigned((first_upload - input.RecordingStartedAt()) * portTICK_PERIOD_MS));
+                    }
+                    sent_bytes += bytes;
+                }
+            }
+            if (reply.failure.load())
+                break;
+            if (input.CaptureDone() && pending_frame.empty() && audio.IsEncodingIdle()) {
+                if (input.Failure() || audio.HasEncodingError()) {
+                    reply.Fail("voice capture/encode incomplete");
+                    break;
+                }
+                if (sent > 0 && sent == input.ExpectedPackets())
+                    break;
+            }
+            // No idle deadline. Once speech starts, bound utterance + upload tail.
+            if (input.VoiceStarted() &&
+                xTaskGetTickCount() - input.RecordingStartedAt() > pdMS_TO_TICKS(15000)) {
+                reply.Fail("voice capture/upload timeout");
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
-        // Allow cloud synthesis more time before the first audio packet.
-        const TickType_t silence_limit = pdMS_TO_TICKS(reply.packets.load() ? 15000 : 30000);
-        if (!reply.ended && now - reply.last_packet.load() > silence_limit) {
-            reply.Fail(reply.packets ? "audio stalled" : "no audio received within 30s");
-            break;
+        const size_t recorded_samples = input.SamplesRecorded();
+        input.Stop();  // Producer and encoder are joined before playback begins.
+        if (reply.failure.load()) {
+            ESP_LOGE("VOICE", "VOICE_STREAM_FAILED: %s; sent_packets=%u", reply.failure.load(),
+                     unsigned(sent));
+            close_session();
+            return false;
         }
-        vTaskDelay(pdMS_TO_TICKS(5));
+        const TickType_t uploaded_at = xTaskGetTickCount();
+        ESP_LOGI("VOICE", "VOICE_TIMING: audio_ms=%u first_upload_ms=%u upload_tail_ms=%u",
+                 unsigned(recorded_samples * 1000 / 16000),
+                 unsigned((first_upload - input.RecordingStartedAt()) * portTICK_PERIOD_MS),
+                 unsigned((uploaded_at - input.RecordingEndedAt()) * portTICK_PERIOD_MS));
+        if (!start_playback()) {
+            close_session();
+            return false;
+        }
+        reply.request_finished = xTaskGetTickCount();
+        protocol.SendStopListening();
+        ESP_LOGI("VOICE", "VOICE_UPLOADED: packets=%u bytes=%u; waiting for recognition and reply",
+                 unsigned(sent), unsigned(sent_bytes));
+#else
+        if (!start_playback()) {
+            close_session();
+            return false;
+        }
+        reply.request_finished = xTaskGetTickCount();
+        protocol.SendWakeWordDetected("你好小智");
+        ESP_LOGI("WS", "WAKE_GREETING_REQUESTED: standard short wake phrase; first audio timeout=30s");
+#endif
+        const TickType_t started = xTaskGetTickCount();
+        reply.last_packet = started;
+        bool ok = false;
+        for (;;) {
+            if (reply.failure.load() || (!reply.ended && !protocol.Heartbeat()))
+                break;
+            if (audio.HasPlaybackError()) {
+                reply.Fail("decoder or speaker open/write failed");
+                break;
+            }
+            if (reply.ended && audio.IsPlaybackIdle()) {
+                ok = reply.packets > 0 && audio.FinishPlayback();
+                if (!ok)
+                    reply.Fail(reply.packets ? "speaker DMA drain failed" : "TTS ended without audio");
+                break;
+            }
+            const TickType_t now = xTaskGetTickCount();
+            if (now - started > pdMS_TO_TICKS(120000)) {
+                reply.Fail("reply total timeout");
+                break;
+            }
+            const TickType_t silence_limit = pdMS_TO_TICKS(reply.packets.load() ? 15000 : 30000);
+            if (!reply.ended && now - reply.last_packet.load() > silence_limit) {
+                reply.Fail(reply.packets ? "audio stalled" : "no audio received within 30s");
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+        ESP_LOGI("WS", "REPLY_SUMMARY: round=%u audio_packets=%u json_messages=%u tts_started=%d",
+                 completed + 1, reply.packets.load(), reply.json_messages.load(),
+                 int(reply.tts_started.load()));
+        ok = ok && !reply.failure.load();
+        reply.active = false;
+        MemoryDiagnosticsStage("before_audio_service_stop");
+        audio.Stop();
+        vTaskDelay(pdMS_TO_TICKS(20));  // Reclaim dynamic playback stacks before another round.
+        if (!ok) {
+            close_session();
+            ESP_LOGE("Audio", "AUDIO_REPLY_FAILED: %s; reset to retry",
+                     reply.failure.load() ? reply.failure.load() : "connection or playback failed");
+            return false;
+        }
+        ++completed;
+        ESP_LOGI("Audio", "AUDIO_REPLY_DONE: round=%u packets=%u; speaker drained and muted",
+                 completed, reply.packets.load());
+        if (limit && completed >= limit) {
+            close_session();
+            return true;
+        }
+        ESP_LOGI("VOICE", "AUTO_LISTEN_RESUME: round=%u completed; same server session", completed);
+        vTaskDelay(pdMS_TO_TICKS(300));  // Let the last speaker sound decay before ADC/VAD calibration.
     }
-    ESP_LOGI("WS", "REPLY_SUMMARY: audio_packets=%u json_messages=%u tts_started=%d channel_open=%d",
-             reply.packets.load(), reply.json_messages.load(), int(reply.tts_started.load()),
-             int(protocol.IsAudioChannelOpened()));
-    ok = ok && !reply.failure.load();
-    reply.active = false;
-    MemoryDiagnosticsStage("before_audio_service_stop");
-    audio.Stop();  // Joins both original workers before abort/free on a failure.
-    close_session();
-    if (ok) {
-        ESP_LOGI("Audio", "AUDIO_REPLY_DONE: AudioService packets=%u; speaker drained and muted",
-                 reply.packets.load());
-    } else {
-        ESP_LOGE("Audio", "AUDIO_REPLY_FAILED: %s; reset to retry", reply.failure.load());
-    }
-    return ok;
 }

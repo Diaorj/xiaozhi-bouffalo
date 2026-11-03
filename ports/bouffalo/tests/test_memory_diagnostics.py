@@ -54,7 +54,7 @@ class MemoryDiagnosticsTests(unittest.TestCase):
             work=Path(directory)
             (work/'FreeRTOS.h').write_text('#pragma once\n#include <stdint.h>\ntypedef void* TaskHandle_t;typedef uint32_t StackType_t;\n')
             (work/'task.h').write_text('#pragma once\n#include "FreeRTOS.h"\nTaskHandle_t xTaskGetCurrentTaskHandle(void);const char* pcTaskGetName(TaskHandle_t);unsigned uxTaskGetStackHighWaterMark(TaskHandle_t);\n')
-            (work/'mm.h').write_text('#pragma once\n#include <stdint.h>\n#include <stddef.h>\n#define MM_HEAP_OCRAM_0 2\n#define MM_HEAP_PSRAM_0 1\nsize_t kfree_size(uint32_t);size_t kmax_free_size(uint32_t);\n')
+            (work/'mm.h').write_text('#pragma once\n#include <stdint.h>\n#include <stddef.h>\n#define MM_HEAP_OCRAM_0 2\n#define MM_HEAP_WRAM_0 3\n#define MM_HEAP_PSRAM_0 1\nsize_t kfree_size(uint32_t);size_t kmax_free_size(uint32_t);\n')
             (work/'bflb_irq.h').write_text('#include <stdint.h>\nuintptr_t bflb_irq_save(void);void bflb_irq_restore(uintptr_t);\n')
             (work/'check.c').write_text(HARNESS)
             exe=work/'check'

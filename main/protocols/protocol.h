@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <functional>
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -80,7 +81,11 @@ protected:
 
     int server_sample_rate_ = 24000;
     int server_frame_duration_ = 60;
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+    std::atomic<bool> error_occurred_{false};
+#else
     bool error_occurred_ = false;
+#endif
     std::string session_id_;
     std::chrono::time_point<std::chrono::steady_clock> last_incoming_time_;
 

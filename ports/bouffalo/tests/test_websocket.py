@@ -51,7 +51,8 @@ EventBits_t xEventGroupWaitBits(EventGroupHandle_t g,EventBits_t bits,int clear,
     else g->changed.wait_for(l,std::chrono::milliseconds(150),ready);
     auto old=g->bits;if(clear && ready())g->bits&=~bits;return old;
 }
-unsigned xTaskGetTickCount() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+std::atomic<unsigned> test_tick_offset{0}, client_pings{0};
+unsigned xTaskGetTickCount() { return test_tick_offset + std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 void vTaskDelay(unsigned) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
 int xTaskCreate(void(*fn)(void*),const char*,unsigned,void* p,unsigned,void* out) {
     if(mode==7)return 0;
@@ -128,6 +129,7 @@ extern "C" int TlsSdkWrite(void* handle,const void* data,size_t size) {
             if(mode!=14)queue(t,frame(payload,0x88));
             continue;
         }
+        if(opcode==9) {++client_pings;if(mode!=17)queue(t,frame(payload,0x8a));continue;}
         assert(opcode==1);
         auto root=cJSON_Parse(payload.c_str());assert(root);
         assert(std::strcmp(cJSON_GetObjectItem(root,"type")->valuestring,"hello")==0);
@@ -200,12 +202,21 @@ int main(int argc,char** argv) {
     {
         WebsocketProtocol protocol;
         assert(protocol.Start());
-        bool ok=protocol.OpenAudioChannel();assert(ok==(mode==0 || mode==14 || mode==15));
+        bool ok=protocol.OpenAudioChannel();assert(ok==(mode==0 || mode==14 || mode==15 || mode==16 || mode==17));
         if(ok) {
             assert(protocol.session_id()=="test-session" && protocol.server_sample_rate()==24000);
             assert(protocol.IsAudioChannelOpened());
             for(int i=0;i<100 && pong_count==0;i++)std::this_thread::sleep_for(std::chrono::milliseconds(1));
             assert(pong_count==1);
+            if(mode==16 || mode==17) {
+                test_tick_offset+=21000;assert(protocol.Heartbeat());
+                for(int i=0;i<100 && client_pings==0;i++)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                assert(client_pings==1);
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                test_tick_offset+=31000;
+                if(mode==16)assert(protocol.Heartbeat() && protocol.IsAudioChannelOpened());
+                else assert(!protocol.Heartbeat() && !protocol.IsAudioChannelOpened());
+            }
             protocol.CloseAudioChannel(true);assert(!protocol.IsAudioChannelOpened());
             assert(live_tls==0 && close_count==(mode==15?0:1));
             protocol.CloseAudioChannel(true);assert(live_tls==0);
@@ -240,7 +251,7 @@ class WebsocketTests(unittest.TestCase):
             includes=[work,work/'interfaces',PORT,PORT/'compat',ROOT/'main',ROOT/'main/boards/common',ROOT/'third_party/tl-expected/include',CJSON]
             sources=[ROOT/'main/protocols/protocol.cc',ROOT/'main/protocols/websocket_protocol.cc',PORT/'tcp_bouffalo.cc',PORT/'websocket_support.cc',work/'web_socket.cc',work/'test.cc',work/'json.o']
             subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-DXIAOZHI_PLATFORM_BOUFFALO=1','-pthread',*['-I'+str(x) for x in includes],*[str(x) for x in sources],'-o',str(work/'test')],check=True)
-            for mode in range(16):
+            for mode in range(18):
                 with self.subTest(mode=mode):
                     result=subprocess.run([str(work/'test'),str(mode)],check=False,text=True,capture_output=True,timeout=10)
                     self.assertEqual(result.returncode,0,result.stdout+result.stderr)

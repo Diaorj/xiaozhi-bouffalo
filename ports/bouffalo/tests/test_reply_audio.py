@@ -70,6 +70,8 @@ extern "C" void AudioSdkAbort() { ++abort_audio; }
 extern "C" int AudioSdkRecordOpen() { return -1; }
 extern "C" int AudioSdkRead(int16_t*,size_t) { return -1; }
 extern "C" void AudioSdkRecordClose() {}
+extern "C" int AudioEncoderWorkerStart(void(*)(void*),void*,TaskHandle_t*) {return -1;}
+extern "C" int AudioEncoderWorkerWait() {return -1;}
 """+t[i:]
             t=t.replace('static int mode, live_tls, requests, hello_count;', 'static int mode, live_tls, requests;')
             t=t.replace('int xTaskCreate(void(*fn)(void*),const char*,unsigned,void* p,unsigned,void* out) {', r"""int xTaskCreate(void(*fn)(void*),const char* name,unsigned,void* p,unsigned,void* out) {
@@ -209,26 +211,31 @@ int main(int argc,char** argv) {
             extra=[]
             if voice_tests:
                 sources[0:0]=[PORT/'voice_input.cc',PORT/'opus_encoder_bouffalo.cc']
+                subprocess.run(['gcc','-std=c99','-I'+str(PORT),'-c',str(PORT/'audio_vad.c'),'-o',str(work/'vad.o')],check=True)
+                sources.insert(-1,work/'vad.o')
                 extra=['-DXIAOZHI_VOICE_INPUT_TEST=1']
             subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-pthread','-DXIAOZHI_PLATFORM_BOUFFALO=1','-DXIAOZHI_AUDIO_PLATFORM_BACKEND=1',*extra,*['-I'+str(x) for x in include],*[str(x) for x in sources],'-lm','-o',str(work/'check')],check=True)
             if voice_tests:
-                for case in [0,3,20,21,22,23,24,25,26,27]:
+                for case in [0,3,20,21,22,23,24,25,26,27,30,31,32,33]:
                     with self.subTest(case=case):
                         result=subprocess.run([str(work/'check'),str(case)],capture_output=True,text=True,timeout=25)
                         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
                         self.assertIn('VOICE_TEST_OK',result.stdout)
-                        if case not in (23,24):
+                        if case not in (22,23,24):
                             self.assertIn('WS_SESSION_RELEASED:',result.stdout)
-                        if case==0:
-                            self.assertIn('VOICE_UPLOADED: packets=84',result.stdout)
+                        if case in (0,30,31,32):
+                            self.assertIn('VOICE_UPLOADED: packets=',result.stdout)
                             self.assertIn('RECOGNIZED: test utterance',result.stdout)
                             self.assertIn('AUDIO_REPLY_DONE:',result.stdout)
-                            timing=re.search(r'capture_ms=(\d+) first_upload_ms=(\d+) upload_tail_ms=(\d+)',result.stdout)
+                            timing=re.search(r'audio_ms=(\d+) first_upload_ms=(\d+) upload_tail_ms=(\d+)',result.stdout)
                             self.assertIsNotNone(timing,result.stdout)
                             capture,first,tail=map(int,timing.groups())
                             self.assertLess(first,capture)
                             self.assertLess(tail,500)
-                        if case in (25,26,27):
+                        if case==30:
+                            self.assertEqual(result.stdout.count('AUDIO_REPLY_DONE:'),20)
+                            self.assertEqual(result.stdout.count('AUTO_LISTEN_RESUME:'),19)
+                        if case in (25,26,27,33):
                             self.assertIn('VOICE_STREAM_FAILED:',result.stdout)
                 return
             for case in range(18):

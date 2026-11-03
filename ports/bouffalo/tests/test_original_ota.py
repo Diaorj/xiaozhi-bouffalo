@@ -25,6 +25,8 @@ BouffaloAudioCodec::BouffaloAudioCodec() {}
 bool BouffaloAudioCodec::FinishOutput(){return true;}
 void BouffaloAudioCodec::Start() {}
 void BouffaloAudioCodec::EnableOutput(bool) {}
+void BouffaloAudioCodec::EnableInput(bool) {}
+int BouffaloAudioCodec::Read(int16_t*,int) {return -1;}
 int BouffaloAudioCodec::Write(const int16_t*,int) { return -1; }
 static int mode, calls;
 static long utc;

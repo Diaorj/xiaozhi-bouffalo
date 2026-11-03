@@ -28,11 +28,14 @@ static const char* current_name(TaskHandle_t task) {
 static void print_heap(const char* stage, TaskHandle_t task) {
     printf(
         "[I][MEM] stage=%s task=%s ocram_free=%lu ocram_largest=%lu "
-        "psram_free=%lu psram_largest=%lu stack_low_water_bytes=%lu\r\n",
+        "psram_free=%lu psram_largest=%lu stack_low_water_bytes=%lu "
+        "wram_free=%lu wram_largest=%lu\r\n",
         stage, current_name(task), (unsigned long)kfree_size(MM_HEAP_OCRAM_0),
         (unsigned long)kmax_free_size(MM_HEAP_OCRAM_0), (unsigned long)kfree_size(MM_HEAP_PSRAM_0),
         (unsigned long)kmax_free_size(MM_HEAP_PSRAM_0),
-        task ? (unsigned long)uxTaskGetStackHighWaterMark(task) * sizeof(StackType_t) : 0UL);
+        task ? (unsigned long)uxTaskGetStackHighWaterMark(task) * sizeof(StackType_t) : 0UL,
+        (unsigned long)kfree_size(MM_HEAP_WRAM_0),
+        (unsigned long)kmax_free_size(MM_HEAP_WRAM_0));
 }
 
 void MemoryDiagnosticsStage(const char* stage) {

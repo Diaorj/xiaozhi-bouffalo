@@ -79,8 +79,31 @@ bool WebsocketProtocol::SendText(const std::string& text) {
 }
 
 bool WebsocketProtocol::IsAudioChannelOpened() const {
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+    return websocket_ && websocket_->IsConnected() && !error_occurred_ &&
+           xTaskGetTickCount() - last_activity_tick_.load() <= pdMS_TO_TICKS(120000);
+#else
     return websocket_ != nullptr && websocket_->IsConnected() && !error_occurred_ && !IsTimeout();
+#endif
 }
+
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+bool WebsocketProtocol::Heartbeat() {
+    if (!websocket_ || !websocket_->IsConnected() || error_occurred_)
+        return false;
+    const TickType_t now = xTaskGetTickCount();
+    if (ping_pending_ && now - last_ping_tick_ > pdMS_TO_TICKS(30000)) {
+        SetError("WebSocket heartbeat timeout");
+        return false;
+    }
+    if (!ping_pending_ && now - last_ping_tick_ >= pdMS_TO_TICKS(20000)) {
+        last_ping_tick_ = now;
+        ping_pending_ = true;
+        websocket_->Ping();
+    }
+    return true;
+}
+#endif
 
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
 #ifdef XIAOZHI_PLATFORM_BOUFFALO
@@ -117,6 +140,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
     session_id_.clear();
     error_occurred_ = false;
 #ifdef XIAOZHI_PLATFORM_BOUFFALO
+    last_activity_tick_ = last_ping_tick_ = xTaskGetTickCount();
+    ping_pending_ = false;
+#endif
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
     // Credentials come from OTA; only verified WSS is supported by this port.
     std::string host, port, path;
     if (!ParseSecureWebsocketUri(url.c_str(), host, port, path) || version_ < 1 || version_ > 3 ||
@@ -144,9 +171,18 @@ bool WebsocketProtocol::OpenAudioChannel() {
     websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
     websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
 
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+    websocket_->OnPong([this](const char*, size_t) {
+        last_activity_tick_ = xTaskGetTickCount();
+        ping_pending_ = false;
+    });
+#endif
     websocket_->OnData([this](const char* data, size_t len, bool binary) {
         // Publish the receive time before hello signals the waiting owner task.
         last_incoming_time_ = std::chrono::steady_clock::now();
+#ifdef XIAOZHI_PLATFORM_BOUFFALO
+        last_activity_tick_ = xTaskGetTickCount();
+#endif
         if (binary) {
             if (on_incoming_audio_ != nullptr) {
                 if (version_ == 2 || version_ == 3) {

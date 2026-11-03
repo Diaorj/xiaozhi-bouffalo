@@ -30,6 +30,8 @@ target_sources(app PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/audio_codec_bouffalo.cc"
     "${CMAKE_CURRENT_LIST_DIR}/audio_sdk_bridge.c"
     "${CMAKE_CURRENT_LIST_DIR}/audio_dma_worker.c"
+    "${CMAKE_CURRENT_LIST_DIR}/audio_encoder_worker.c"
+    "${CMAKE_CURRENT_LIST_DIR}/audio_vad.c"
     "${CMAKE_CURRENT_LIST_DIR}/pcm_ring.c"
     "${CMAKE_CURRENT_LIST_DIR}/memory_diagnostics.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../main/audio/audio_codec.cc"
@@ -75,10 +77,12 @@ set_target_properties(app ${CMAKE_PROJECT_NAME}.elf PROPERTIES
 target_include_directories(app PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../../main")
 target_include_directories(${CMAKE_PROJECT_NAME}.elf PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../../main")
 
-option(XIAOZHI_VOICE_INPUT_TEST "Capture and upload one spoken question at boot" ON)
+option(XIAOZHI_VOICE_INPUT_TEST "Capture and upload spoken questions" ON)
+option(XIAOZHI_AUTO_CHAT "Resume voice listening after each reply" ON)
 foreach(target app ${CMAKE_PROJECT_NAME}.elf)
     target_compile_definitions(${target} PRIVATE
-        XIAOZHI_VOICE_INPUT_TEST=$<BOOL:${XIAOZHI_VOICE_INPUT_TEST}>)
+        XIAOZHI_VOICE_INPUT_TEST=$<BOOL:${XIAOZHI_VOICE_INPUT_TEST}>
+        XIAOZHI_AUTO_CHAT=$<BOOL:${XIAOZHI_AUTO_CHAT}>)
 endforeach()
 
 # This firmware always has a pthread backend. GCC 10's weak gthread probe uses

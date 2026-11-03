@@ -1,14 +1,14 @@
 # Bouffalo / BL616CL 移植
 
-当前保留小智原工程结构，用 Bouffalo SDK 构建 BL616CL 固件。已在板上验证官方 OTA 检查、工作台绑定、WebSocket 握手与 AudioService 语音播放。单轮麦克风输入已在板上完成官方识别与回答播放；本次继续改成流式上传，待板上确认延迟与内存。
+保留小智原工程结构，用 Bouffalo SDK 构建 BL616CL 固件。官方 OTA、绑定、语音输入输出、流式上传已在板上验证，基线提交为 `71af7cc`。本次加入 VAD 和播放后恢复监听，连续对话的实际效果待板上确认。
 
 ## 构建与烧录
 
-当前 SDK：`db9219af`（2.3.38，含父提交 `ae8ff431`）。工具链为同事提供的 GCC 14.3.0、POSIX gthread、Picolibc 版本。
+SDK：`db9219af`（2.3.38，含 `ae8ff431`）。工具链：同事提供的 GCC 14.3.0、POSIX gthread、Picolibc 版本。
 工程目录：`bouffalo_sdk/examples/solution/xiaozhi-bouffalo`。
 
 ```sh
-# 首次使用才复制，并在本地文件填写 2.4 GHz 热点；该文件被 Git 忽略。
+# 首次使用才复制；编辑本地文件填写 2.4 GHz 热点，该文件被 Git 忽略。
 cp -n ports/bouffalo/wifi_config.example.h ports/bouffalo/wifi_config.h
 export PATH="$HOME/riscv64-zephyr-elf-gthread/bin:$PATH"
 make CHIP=bl616cl BOARD=bl616cldk \
@@ -16,84 +16,67 @@ make CHIP=bl616cl BOARD=bl616cldk \
   XIAOZHI_PTHREAD_KEY_ASSERT_STUBS=ON
 ```
 
-固件在 `build/build_out/xiaozhi_bouffalo_bl616cl.bin`。关闭占用 COM7 的终端、让板子进入下载模式后，用相同参数执行 `make flash ... COMX=COM7`，退出下载模式再 RESET。
-当前 VS Code 插件对 BL616CL 仍检查 unknown-elf 前缀，暂用上述终端命令选择新工具链。
+关闭占用 COM7 的终端、进入下载模式后，用相同参数执行 `make flash ... COMX=COM7`，退出下载模式再 RESET。固件为 `build/build_out/xiaozhi_bouffalo_bl616cl.bin`，标记 `auto-chat-20261103-v6`。
+当前 VS Code 插件对 BL616CL 仍检查 unknown-elf 前缀，暂用上述终端命令。
 
-`XIAOZHI_PTHREAD_KEY_ASSERT_STUBS` 默认 OFF；当前 release SDK 缺少工具链所引用的四个 pthread key API 时显式开启。它只补声明和断言入口，调用就中止，不实现线程私有存储。SDK 有完整实现时保持 OFF。
+`XIAOZHI_PTHREAD_KEY_ASSERT_STUBS` 默认 OFF；当前 release SDK 缺四个 pthread key API 时显式开启。它只提供声明和断言入口，调用即中止，不实现线程私有存储。SDK 有完整实现时保持 OFF。
 
-## 当前执行流程
+## 使用
 
-联网 → DNS / SNTP / HTTPS 检查 → 原 `Ota::CheckVersion()` → 连接官方 WebSocket → 提示录音 5 秒，边录边编码上传 → 识别与语音回答 → 播完并主动关闭会话。
+上电联网 → 原 OTA 检查与 WebSocket 认证 → 等待说话 → 边录边编码上传 → 自动判断说话结束 → 播放回答 → 恢复监听。
 
-看到 `RECORDING: speak now, 5 seconds` 后说一个简短问题，例如“你好，你是谁？”。这是一次上电测试；结束后 RESET 再试，不是连续对话或唤醒模式。Wi-Fi、连接或识别失败会打印阶段，心跳继续。
-
-预期日志：
+看到 `AUTO_LISTENING` 后说话。连续安静约 800 ms 结束本轮，单轮最长 10 秒（含前缓冲）。安静时不发送 listen/start 或空录音；80 ms 短噪声会被过滤，至少约 160 ms 语音才触发。每次重新打开麦克风后先进行 300 ms 安静校准。
 
 ```text
-ORIGINAL_WS_OK: authenticated; server hello received; ... connect_ms=...
-RECORDING: speak now, 5 seconds; streaming upload
-VOICE_FIRST_UPLOAD: from_recording_start_ms=...
-VOICE_CAPTURE_DONE: samples=80000 peak=... mean_abs=... packets=84
-VOICE_TIMING: capture_ms=... first_upload_ms=... upload_tail_ms=... total_ms=...
-VOICE_UPLOADED: packets=84 bytes=...; waiting for recognition and reply
-REPLY_FIRST_AUDIO: after_request_ms=...
+AUTO_LISTENING: speak now; stop after 800 ms silence, max 10 s
+VOICE_START: validated voice; preroll retained; streaming upload
+VOICE_CAPTURE_DONE: samples=... packets=... reason=silence
+VOICE_UPLOADED: packets=... bytes=...
 RECOGNIZED: ...
-SPEAKER_PLAYING: PCM 16000 Hz, volume=15
-WS_SESSION_RELEASED: socket and receiver released
-AUDIO_REPLY_DONE: ...
+AUDIO_REPLY_DONE: round=1 ...
+AUTO_LISTEN_RESUME: round=1 completed; same server session
+AUTO_LISTENING: ...
 ```
 
-默认 `XIAOZHI_VOICE_INPUT_TEST=ON`。构建加 `XIAOZHI_VOICE_INPUT_TEST=OFF` 可恢复上一步短唤醒词问候测试；OFF 时不打开麦克风。官方 listen/detect 只能发送唤醒词，语音提问使用原 `SendStartListening(manual)`、`SendAudio()`、`SendStopListening()`。
+默认 `XIAOZHI_AUTO_CHAT=ON`，保留同一条服务端连接连续问答。设为 OFF 可只运行一轮 VAD 问答；`XIAOZHI_VOICE_INPUT_TEST=OFF` 恢复短唤醒词问候测试。
+等待期间每 20 秒发送 WebSocket Ping，30 秒未收到 Pong 则终止并释放连接。网络、编码、播放失败会收尾并打印原因，当前不自动重连 Wi-Fi 或重放失败问题，复位可重试。
 
-## 代码分工
+## 架构与内存
 
-- 原 `Ota`、`Protocol`、`WebsocketProtocol` 负责版本检查、认证、消息序列化及协议解析。
-- 原 `AudioCodec` 接口接到 `audio_codec_bouffalo.cc`，I2C/I2S/DMA 由项目内 `audio_sdk_bridge.c` 调用 SDK。
-- 原 `AudioService` 保留编码队列、发送队列、解码队列和播放队列。新增平台 `AudioEncoder` / `AudioDecoder` 接口注入 SDK Opus 实现；本次仍改动了公共 AudioService，尚不是纯板级新增。
-- `XIAOZHI_AUDIO_PLATFORM_BACKEND` 隔离 ESP 专用音频库和引擎；替代原先名为 PLAYBACK_ONLY 的开关。ESP 默认保留原后端，未进行 ESP-IDF 整机编译。
-- `voice_input.cc` 只做单轮验证的采集控制，不替代完整 `Application`。录音在共用 DMA 工作任务中运行，编码走原 Opus 工作任务，网络任务持续取发送队列；接收回调只入队或置标志。
-- SDK 和第三方原文件未改。`prepare_websocket.py` 在构建时生成原 esp-ml307 v3.7.6 的兼容副本。
+- 原 `Ota`、`Protocol`、`WebsocketProtocol` 处理版本检查、认证和协议。语音使用原 listen/start(manual)、SendAudio、listen/stop；保留同一 session，不在每个回答后重新认证。
+- 原 `AudioService` 保留编码/发送/解码/播放队列，平台 AudioEncoder / AudioDecoder 调用 SDK Opus。公共 AudioService 有平台分支改动，尚未整体接入原 Application、AudioEngine。
+- `VoiceInputSession` 负责 VAD、前缓冲和采集生产者；网络任务从有界 PSRAM PCM 环取帧，再持续排空原发送队列。接收回调只入队或置标志，停止操作由网络任务执行。
+- 录音与播放半双工，复用内部 6 KiB 静态 DMA 任务栈。播放期间停止录音；DMA 排空、静音、任务结束后才恢复监听，另留 300 ms 扬声器尾音衰减时间。
+- 编码工作任务的 32 KiB 栈改为内部 **WRAM**，启动时申请一次并保留复用；它是 BSP 已注册的另一块内部堆。申请前检查至少还留 16 KiB，不足时明确失败，不回退占用 OCRAM。MEM 日志增加 wram_free / wram_largest。
+- 解码 16 KiB、输出 8 KiB 任务栈仍在 OCRAM，按轮创建/停止；解码器状态保留在 PSRAM，启动下一轮播放时复位。编码和播放分阶段，不同时执行。
+- PSRAM 中的 PCM FIFO 固定 1 秒（32000 字节），前缓冲固定 13120 字节；不保存整段录音。编码队列最多 2 帧、发送队列最多 4 包，积压超限明确失败，不静默丢音频。
+- 原能量 VAD 从旧 Demo 移入项目，逐 10 ms 块处理并去除直流偏置。前缓冲保留约 250 ms 静音加语音起始验证段，避免漏掉开头；持续等待时计数保持有界。
 
-## 音频与内存
+WRAM 编码栈是本次新增的内存安排，需要板上确认可用空间和栈水位；复用目的在于避免长连接保留时，每轮重新寻找连续 32 KiB OCRAM。
 
-ES8388：MCLK=1、BCLK=4、LRCK=5、输入 GPIO6、输出 GPIO7、SDA=11、SCL=20。麦克风为 LIN2/RIN2、+18 dB PGA，取 DMA 字的 slot1 / 高 16 位。名义 16 kHz、单声道、有符号 16 位 PCM；实际硬件采样率约 16025.6 Hz。
+SDK 和第三方原文件未改。WebSocket 兼容副本仍由 prepare_websocket.py 生成；本次心跳使用原 WebSocket::Ping/OnPong。Bouffalo 协议活动时间和错误标志使用原子变量，ESP 分支保持原路径，未进行 ESP-IDF 整机编译。
 
-录音和播放半双工，共用内部非缓存 DMA 环（8×160 立体声帧）。录音时 DAC 静音，停止 RX 后才允许播放，默认音量 15、不写 Flash。
+## 音频硬件与格式
 
-录音和上传同时运行；播放任务等输入结束后再创建，控制片内 RAM 峰值：
+ES8388：MCLK=1、BCLK=4、LRCK=5、输入 GPIO6、输出 GPIO7、SDA=11、SCL=20。麦克风使用 LIN2/RIN2、+18 dB PGA，取 slot1 / 高 16 位。16 kHz 单声道有符号 16 位 PCM，实际采样率约 16025.6 Hz。
+Opus 为 VOIP、16 kbps、复杂度 0、60 ms 一帧；末尾不足一帧补零。采样到达自然控制上传速度，没有每包额外 60 ms 延迟。
+播放默认音量 15，不写 Flash；PCM 环 64000 字节在 PSRAM，8×160 帧立体声 DMA 缓冲在内部非缓存 SRAM。
 
-| 阶段 | 主要内存与任务 |
-| --- | --- |
-| 连接准备 | 提前创建编码任务，避免 TLS 分配后找不到连续栈空间；Opus 状态在 PSRAM |
-| 采集 / 编码 / 上传 | 共用原先的 6 KiB 静态 DMA 工作栈；编码任务栈 32 KiB；网络任务持续发送，不保存整段 PCM 或压缩录音 |
-| 播放 | 先停止并等待采集/编码任务，释放编码栈和状态；再启动原解码/输出任务，复用同一 DMA 工作任务；PCM 环 64000 字节在 PSRAM |
-
-编码栈由 48 KiB 改为 32 KiB：上一版板上第一帧已测用量约 22 KiB，本版记录第一帧及全部帧结束时的栈水位。需继续用实际对话验证余量；任务栈保持在内部 RAM。
-
-80000 样本编码成 84 帧，末尾补零至 80640 样本，每帧 60 ms；SDK Opus VOIP、16 kbps、复杂度 0。发送由采样到达自然控制速度，移除每包额外等待的 60 ms。编码队列最多 2 帧、发送队列最多 4 包；网络阻塞导致积压时明确取消本轮，避免无界申请或静默丢掉语音。
-
-DMA 工作任务现为 `audio_dma_worker.c/.h`（原 speaker_worker），录音和播放顺序复用，栈仍为 1536 words / 6144 字节。输入结束先 join 采集再停止编码，确保不会在生产者仍访问队列或硬件时释放资源。
-
-`VOICE_TIMING` 用于实测：`first_upload_ms` 应小于录音总时长；`upload_tail_ms` 是录音结束后等待编码/发送收尾的时间，不应再有固定 5 秒上传等待。`REPLY_FIRST_AUDIO` 记录发送 listen/stop 到收到首个回答音频包的时间；实际值受网络及服务端影响。
-
-播放队列上限 128 包、累计 64 KiB，每包最多 4096 字节。TTS stop 后等待队列和 DMA 排空，再停止任务。单轮结束由控制任务发送 close 帧，最多等 1 秒后强制释放 socket/TLS。此前多次 RESET 播放已在板上验证；“服务端残留会话”仍不是已证实的唯一根因。
+`VOICE_TIMING` 中 audio_ms 是本轮有效录音长度，first_upload_ms 是检测到语音到首包发出的时间，upload_tail_ms 是录音结束后的上传收尾时间。`REPLY_FIRST_AUDIO` 记录发送 listen/stop 到收到首包回答的时间。
 
 ## 网络与存储边界
 
-- Wi-Fi 用 DHCP、可选 PMF，只提交一次连接；暂不自动重连或配网。
-- 官方 MAC/稳定 UUID 沿用工作台绑定；不打印 token。模型和语音服务由官方服务端提供。
-- HTTPS/WSS 使用 SDK TLS，校验 CA、主机名和日期，当前信任 DigiCert Global Root G2；不跳过校验。
-- `Settings` 使用 SDK LittleFS KV，保存在既有 PSM 分区（4 MiB 配置下 0x3E9000、32 KiB）；正常 RESET 保留，整片擦除不保留。
-- HTTP 适配目前支持 OTA 所需的有界 GET/JSON POST；不支持任意流式请求。固件升级、MQTT/UDP、完整 Application、AudioEngine、唤醒词、AEC、语音打断和连续监听均未接入。
+Wi-Fi 使用 DHCP、可选 PMF，只提交一次连接，暂不配网。MAC 和稳定 UUID 沿用官方工作台绑定；不打印 token。模型、识别和语音合成由官方服务端提供。
+HTTPS/WSS 使用 SDK TLS，保留 CA、主机名和日期校验，当前信任 DigiCert Global Root G2。Settings 使用既有 PSM 分区的 LittleFS KV（4 MiB 配置：0x3E9000、32 KiB），正常 RESET 保留，整片擦除不保留。
+HTTP 适配支持 OTA 所需的有界请求；固件升级、MQTT/UDP、唤醒词、AEC 和语音打断尚未接入。
 
 ## 验证
 
 ```sh
-# release SDK 只有 Opus 静态库，主机测试用内部 SDK 的对应源码。
 export XIAOZHI_HOST_OPUS_SOURCE="$HOME/workspace/bouffalo_sdk_internal/bouffalo_sdk/components/multimedia/opus"
-cd ports/bouffalo/tests
-python3 -m unittest -v test_voice_input test_reply_audio test_audio_dma_worker test_tls_read_diagnostics test_websocket
+python3 -m unittest discover -s ports/bouffalo/tests -v
+python3 -m unittest discover -s scripts/tests -v
 ```
 
-语音集成测试模拟麦克风和网络，编译实际 SDK Opus 源码，检查第一包在录音结束前上传、84 帧能解码、识别消息与回答播放流程，以及输入/任务/上传失败、发送积压和中途断线的取消与清理。旧问候的 18 个生命周期场景和 WebSocket/TLS、固定任务栈回归同时通过。
-主机测试不等于真实麦克风、官方 ASR 或扬声器验证；本次流式上传仍需板上确认。SDK 的 bflb_dbg.h 有符号比较警告仍存在。
+release SDK 为预编译 Opus 库，主机测试使用对应 SDK 源码。模拟覆盖同一连接 20 轮识别和播放、静音不提问、短噪声过滤、10 秒上限、心跳确认/超时及失败清理；实际 WRAM 工作任务另验证多次复用只分配一份栈。
+主机测试和成功构建不等于板上验证；需要实测 VAD 阈值、背景噪声、长时间多轮和内存余量。SDK bflb_dbg.h 的有符号比较警告仍存在。

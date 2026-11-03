@@ -197,6 +197,7 @@ private:
 #ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
     std::unique_ptr<AudioEncoder> platform_encoder_;
     bool encode_in_flight_ = false;
+    bool platform_encoder_job_ = false;
     std::atomic<bool> encoding_failed_{false};
 #endif
 #ifndef XIAOZHI_AUDIO_PLATFORM_BACKEND
