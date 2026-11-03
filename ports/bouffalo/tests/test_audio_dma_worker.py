@@ -1,4 +1,4 @@
-"""Exercise the real static speaker worker with a host FreeRTOS simulation."""
+"""Exercise the real shared DMA worker with a host FreeRTOS simulation."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -18,7 +18,7 @@ extern "C" {
 #include "FreeRTOS.h"
 #include "event_groups.h"
 #include "task.h"
-#include "speaker_worker.h"
+#include "audio_dma_worker.h"
 }
 struct MockEvent { std::mutex lock; std::condition_variable cv; unsigned bits=0; };
 struct MockTask { std::mutex lock; std::condition_variable cv; unsigned notices=0; };
@@ -64,28 +64,28 @@ static void blocked_job(void*) {
 }
 int main(int argc,char** argv) {
     assert(argc==2);mode=unsigned(std::atoi(argv[1]));
-    assert(SpeakerWorkerWait()==-1 && SpeakerWorkerStart(nullptr,nullptr)==-1);
-    if(mode)assert(SpeakerWorkerStart(simple_job,&calls)==-1);
+    assert(AudioDmaWorkerWait()==-1 && AudioDmaWorkerStart(nullptr,nullptr)==-1);
+    if(mode)assert(AudioDmaWorkerStart(simple_job,&calls)==-1);
     for(unsigned i=0;i<50;++i) {
-        assert(SpeakerWorkerStart(simple_job,&calls)==0);
-        assert(SpeakerWorkerStart(simple_job,&calls)==-1);
-        assert(SpeakerWorkerWait()==0 && calls==i+1 && SpeakerWorkerWait()==-1);
+        assert(AudioDmaWorkerStart(simple_job,&calls)==0);
+        assert(AudioDmaWorkerStart(simple_job,&calls)==-1);
+        assert(AudioDmaWorkerWait()==0 && calls==i+1 && AudioDmaWorkerWait()==-1);
     }
-    assert(SpeakerWorkerStart(blocked_job,nullptr)==0);
+    assert(AudioDmaWorkerStart(blocked_job,nullptr)==0);
     while(!entered)std::this_thread::sleep_for(std::chrono::milliseconds(1));
     std::atomic<bool> waiting{false}, joined{false};
-    std::thread waiter([&]{waiting=true;assert(SpeakerWorkerWait()==0);joined=true;});
+    std::thread waiter([&]{waiting=true;assert(AudioDmaWorkerWait()==0);joined=true;});
     while(!waiting)std::this_thread::sleep_for(std::chrono::milliseconds(1));
     std::this_thread::sleep_for(std::chrono::milliseconds(10));assert(!joined);
     release_job=true;waiter.join();assert(joined && calls==51);
     assert(task_creates==(mode==1?2:1) && event_creates==(mode==2?2:1));
-    puts("STATIC_SPEAKER_REUSE_OK");fflush(stdout);
+    puts("STATIC_AUDIO_DMA_REUSE_OK");fflush(stdout);
     // The firmware worker deliberately lives for the process lifetime.
     std::_Exit(0);
 }
 """
 
-class SpeakerWorkerTests(unittest.TestCase):
+class AudioDmaWorkerTests(unittest.TestCase):
     def test_static_reservation_reuse_join_and_creation_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             work=Path(directory)
@@ -93,12 +93,12 @@ class SpeakerWorkerTests(unittest.TestCase):
             (work/'event_groups.h').write_text('#pragma once\n#include "FreeRTOS.h"\ntypedef struct MockEvent* EventGroupHandle_t;typedef unsigned EventBits_t;\nEventGroupHandle_t xEventGroupCreateStatic(StaticEventGroup_t*);\nEventBits_t xEventGroupSetBits(EventGroupHandle_t,EventBits_t);\nEventBits_t xEventGroupClearBits(EventGroupHandle_t,EventBits_t);\nEventBits_t xEventGroupWaitBits(EventGroupHandle_t,EventBits_t,int,int,unsigned);\n')
             (work/'task.h').write_text('#pragma once\n#include "FreeRTOS.h"\nunsigned ulTaskNotifyTake(int,unsigned);void xTaskNotifyGive(TaskHandle_t);\nTaskHandle_t xTaskCreateStatic(void(*)(void*),const char*,unsigned,void*,unsigned,StackType_t*,StaticTask_t*);\n')
             (work/'test.cc').write_text(HARNESS)
-            subprocess.run(['gcc','-std=c11','-Wall','-Wextra','-Werror','-I'+str(work),'-I'+str(PORT),'-c',str(PORT/'speaker_worker.c'),'-o',str(work/'worker.o')],check=True)
+            subprocess.run(['gcc','-std=c11','-Wall','-Wextra','-Werror','-I'+str(work),'-I'+str(PORT),'-c',str(PORT/'audio_dma_worker.c'),'-o',str(work/'worker.o')],check=True)
             subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror','-pthread','-I'+str(work),'-I'+str(PORT),str(work/'test.cc'),str(work/'worker.o'),'-o',str(work/'test')],check=True)
             for mode in range(3):
                 with self.subTest(mode=mode):
                     result=subprocess.run([str(work/'test'),str(mode)],capture_output=True,text=True,timeout=5)
                     self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-                    self.assertIn('STATIC_SPEAKER_REUSE_OK',result.stdout)
+                    self.assertIn('STATIC_AUDIO_DMA_REUSE_OK',result.stdout)
 
 if __name__=='__main__':unittest.main()

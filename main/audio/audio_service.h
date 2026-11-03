@@ -55,7 +55,11 @@
 #else
 #define MAX_DECODE_PACKETS_IN_QUEUE (1200 / OPUS_FRAME_DURATION_MS)
 #endif
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
+#define MAX_SEND_PACKETS_IN_QUEUE 4
+#else
 #define MAX_SEND_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
+#endif
 #define AUDIO_TESTING_MAX_DURATION_MS 10000
 #define MAX_TIMESTAMPS_IN_QUEUE 3
 
@@ -138,7 +142,7 @@ public:
     void Stop();
     bool IsRunning() const { return !service_stopped_.load(); }
 #ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
-    // Owner task only: encode a buffered utterance before opening TLS/playback.
+    // Owner task only: encoding runs before playback, and may overlap capture/TLS.
     bool StartEncoding(std::unique_ptr<AudioEncoder> encoder);
     bool PushPcmToEncodeQueue(std::vector<int16_t>&& pcm);
     bool IsEncodingIdle();

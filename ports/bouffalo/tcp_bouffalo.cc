@@ -38,7 +38,7 @@ int BouffaloSsl::Send(const std::string& data) {
         sent += result;
     }
     // Transport acceptance is not proof that the server processed the message.
-    ESP_LOGI("TLS", "WSS_TX_OK: bytes=%u", unsigned(sent));
+    ESP_LOGD("TLS", "WSS_TX_OK: bytes=%u", unsigned(sent));
     // Upstream WebSocket registers OnStream after Connect, before its first Send.
     if (!receiver_started_) {
         xEventGroupClearBits(finished_, 1);

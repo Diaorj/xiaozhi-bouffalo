@@ -212,18 +212,24 @@ int main(int argc,char** argv) {
                 extra=['-DXIAOZHI_VOICE_INPUT_TEST=1']
             subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-pthread','-DXIAOZHI_PLATFORM_BOUFFALO=1','-DXIAOZHI_AUDIO_PLATFORM_BACKEND=1',*extra,*['-I'+str(x) for x in include],*[str(x) for x in sources],'-lm','-o',str(work/'check')],check=True)
             if voice_tests:
-                for case in [0,3,20,21,22,23,24,25]:
+                for case in [0,3,20,21,22,23,24,25,26,27]:
                     with self.subTest(case=case):
                         result=subprocess.run([str(work/'check'),str(case)],capture_output=True,text=True,timeout=25)
                         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
                         self.assertIn('VOICE_TEST_OK',result.stdout)
-                        if case in (0,3,25):
-                            self.assertIn('VOICE_ENCODE_DONE: packets=84',result.stdout)
+                        if case not in (23,24):
                             self.assertIn('WS_SESSION_RELEASED:',result.stdout)
                         if case==0:
-                            self.assertIn('VOICE_UPLOADED:',result.stdout)
+                            self.assertIn('VOICE_UPLOADED: packets=84',result.stdout)
                             self.assertIn('RECOGNIZED: test utterance',result.stdout)
                             self.assertIn('AUDIO_REPLY_DONE:',result.stdout)
+                            timing=re.search(r'capture_ms=(\d+) first_upload_ms=(\d+) upload_tail_ms=(\d+)',result.stdout)
+                            self.assertIsNotNone(timing,result.stdout)
+                            capture,first,tail=map(int,timing.groups())
+                            self.assertLess(first,capture)
+                            self.assertLess(tail,500)
+                        if case in (25,26,27):
+                            self.assertIn('VOICE_STREAM_FAILED:',result.stdout)
                 return
             for case in range(18):
                 with self.subTest(case=case):

@@ -29,7 +29,7 @@ target_sources(app PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/voice_input.cc"
     "${CMAKE_CURRENT_LIST_DIR}/audio_codec_bouffalo.cc"
     "${CMAKE_CURRENT_LIST_DIR}/audio_sdk_bridge.c"
-    "${CMAKE_CURRENT_LIST_DIR}/speaker_worker.c"
+    "${CMAKE_CURRENT_LIST_DIR}/audio_dma_worker.c"
     "${CMAKE_CURRENT_LIST_DIR}/pcm_ring.c"
     "${CMAKE_CURRENT_LIST_DIR}/memory_diagnostics.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../main/audio/audio_codec.cc"

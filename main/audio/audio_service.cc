@@ -1,6 +1,9 @@
 #include "audio_service.h"
 #include <esp_log.h>
 #include <cstring>
+#ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
+#include "memory_diagnostics.h"
+#endif
 
 #ifndef XIAOZHI_AUDIO_PLATFORM_BACKEND
 #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)                                        \
@@ -234,21 +237,22 @@ bool AudioService::StartEncoding(std::unique_ptr<AudioEncoder> encoder) {
     playback_accepting_ = false;
     service_stopped_ = false;
     xEventGroupClearBits(event_group_, kDecoderStopped);
-    // SDK Opus uses variable-length stack workspaces. This larger stack exists
-    // only during pre-encoding, before TLS and playback tasks are created.
+    // The verified first-frame stack use was ~22 KiB. Reserve 32 KiB while
+    // capturing/uploading; this worker is stopped before playback starts.
     if (xTaskCreate(
             [](void* arg) {
                 auto* self = static_cast<AudioService*>(arg);
                 self->OpusCodecTask();
+                MemoryDiagnosticsStage("voice_encoder_done");
                 xEventGroupSetBits(self->event_group_, kDecoderStopped);
                 vTaskDelete(nullptr);
             },
-            "opus_encode", 12288, this, 6, &opus_codec_task_handle_) != pdPASS) {
+            "opus_encode", 8192, this, 6, &opus_codec_task_handle_) != pdPASS) {
         opus_codec_task_handle_ = nullptr;
         Stop();
         return false;
     }
-    ESP_LOGI(TAG, "AUDIO_ENCODER_READY: original encode/send queues; stack=49152 bytes");
+    ESP_LOGI(TAG, "AUDIO_ENCODER_READY: original encode/send queues; stack=32768 bytes");
     return true;
 }
 
@@ -674,8 +678,8 @@ void AudioService::OpusCodecTask() {
                 if (task.type == kAudioTaskTypeEncodeToSendQueue) {
                     {
                         std::lock_guard<std::mutex> lock2(audio_queue_mutex_);
-                        /* Never let a full send queue stall encoding: stale realtime
-                         * audio is useless to the server, so drop the oldest packet. */
+                        // The platform path fails visibly on backpressure; ESP retains
+                        // its realtime policy of dropping the oldest queued packet.
                         if (audio_send_queue_.size() >= MAX_SEND_PACKETS_IN_QUEUE) {
 #ifdef XIAOZHI_AUDIO_PLATFORM_BACKEND
                             encoding_failed_ = true;

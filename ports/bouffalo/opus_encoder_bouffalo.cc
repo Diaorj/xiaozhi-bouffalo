@@ -14,7 +14,8 @@ public:
     bool Encode(const std::vector<int16_t>& pcm, std::vector<uint8_t>& packet) override {
         if (pcm.size() != FrameSamples())
             return false;
-        packet.resize(512);
+        // Fixed 16 kbps / 60 ms produces 120 bytes; keep a bounded margin.
+        packet.resize(256);
         int bytes = opus_encode(encoder_, pcm.data(), pcm.size(), packet.data(), packet.size());
         if (bytes <= 0) {
             ESP_LOGE("Audio", "OPUS_ENCODE_FAILED: %d", bytes);

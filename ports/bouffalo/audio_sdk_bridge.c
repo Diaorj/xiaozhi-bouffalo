@@ -16,7 +16,7 @@
 #include "mm.h"
 #include "pcm_ring.h"
 #include "sdk_audio_codec.h"
-#include "speaker_worker.h"
+#include "audio_dma_worker.h"
 #include "task.h"
 #define DBG_TAG "SPEAKER"
 #include "log.h"
@@ -358,8 +358,8 @@ int AudioSdkOpen(unsigned requested_volume) {
     }
     MemoryDiagnosticsStage("before_speaker_task_create");
     LOG_I("SPEAKER_TASK_STATIC: stack_bytes=%lu; internal RAM reserved\r\n",
-          (unsigned long)(SPEAKER_WORKER_STACK_WORDS * sizeof(StackType_t)));
-    if (SpeakerWorkerStart(output_job, NULL) != 0) {
+          (unsigned long)(AUDIO_DMA_WORKER_STACK_WORDS * sizeof(StackType_t)));
+    if (AudioDmaWorkerStart(output_job, NULL) != 0) {
         cleanup();
         kfree(pcm_ring);
         pcm_ring = NULL;
@@ -404,7 +404,7 @@ int AudioSdkFinish(void) {
     if (!running)
         return -1;
     store(&closed, 1);
-    if (SpeakerWorkerWait() != 0)
+    if (AudioDmaWorkerWait() != 0)
         return -1;
     int result = load(&failed) ? -1 : 0;
     kfree(pcm_ring);

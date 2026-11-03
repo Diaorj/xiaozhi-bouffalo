@@ -1,12 +1,12 @@
-#include "speaker_worker.h"
+#include "audio_dma_worker.h"
 #include <stdbool.h>
 #include "FreeRTOS.h"
 #include "event_groups.h"
 #include "task.h"
 
-// Reserve internal RAM at link time: late playback must not depend on finding
-// a contiguous 6 KiB block in the fragmented Wi-Fi/TLS/application heap.
-static StackType_t worker_stack[SPEAKER_WORKER_STACK_WORDS];
+// One fixed internal stack serves recording and playback in turn. Late audio
+// must not depend on finding a contiguous 6 KiB block in the fragmented heap.
+static StackType_t worker_stack[AUDIO_DMA_WORKER_STACK_WORDS];
 static StaticTask_t worker_tcb;
 static StaticEventGroup_t done_storage;
 static EventGroupHandle_t done;
@@ -26,7 +26,7 @@ static void worker_entry(void* context) {
     }
 }
 
-int SpeakerWorkerStart(void (*job)(void*), void* context) {
+int AudioDmaWorkerStart(void (*job)(void*), void* context) {
     if (!job || pending)
         return -1;
     if (!done)
@@ -34,7 +34,7 @@ int SpeakerWorkerStart(void (*job)(void*), void* context) {
     if (!done)
         return -1;
     if (!worker) {
-        worker = xTaskCreateStatic(worker_entry, "speaker_dma", SPEAKER_WORKER_STACK_WORDS,
+        worker = xTaskCreateStatic(worker_entry, "audio_dma", AUDIO_DMA_WORKER_STACK_WORDS,
                                    NULL, 8, worker_stack, &worker_tcb);
     }
     if (!worker)
@@ -47,7 +47,7 @@ int SpeakerWorkerStart(void (*job)(void*), void* context) {
     return 0;
 }
 
-int SpeakerWorkerWait(void) {
+int AudioDmaWorkerWait(void) {
     if (!pending)
         return -1;
     xEventGroupWaitBits(done, 1, pdFALSE, pdTRUE, portMAX_DELAY);
