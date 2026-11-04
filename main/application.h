@@ -4,7 +4,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <freertos/task.h>
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 #include <esp_timer.h>
+#endif
 
 #include <string>
 #include <mutex>
@@ -15,11 +17,17 @@
 #include <vector>
 
 #include "protocol.h"
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 #include "ota.h"
+#endif
 #include "audio_service.h"
 #include "device_state.h"
 #include "device_state_machine.h"
+#ifdef XIAOZHI_APPLICATION_PLATFORM_BACKEND
+#include "platform/application_runtime.h"
+#else
 #include "notify/notify_player.h"
+#endif
 
 // Main event bits
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
@@ -69,7 +77,13 @@ public:
     void Run();
 
     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
+#ifdef XIAOZHI_APPLICATION_PLATFORM_BACKEND
+    bool IsVoiceDetected() const { return runtime_ && runtime_->IsVoiceDetected(); }
+    // Thread-safe platform entry: state changes execute through Schedule() in Run().
+    void PostRuntimeEvent(ApplicationRuntimeEvent event);
+#else
     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
+#endif
     
     /**
      * Request state transition
@@ -134,15 +148,27 @@ private:
     std::deque<std::function<void()>> main_tasks_;
     std::unique_ptr<Protocol> protocol_;
     EventGroupHandle_t event_group_ = nullptr;
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
     esp_timer_handle_t clock_timer_handle_ = nullptr;
+#endif
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;
+#ifdef XIAOZHI_APPLICATION_PLATFORM_BACKEND
+    std::unique_ptr<ApplicationRuntime> runtime_;
+    bool runtime_started_ = false;
+    bool runtime_session_ready_ = false;
+    void HandleRuntimeEvent(ApplicationRuntimeEvent event);
+    void HandlePlaybackDrainedEvent();
+#else
     NotifyPlayer notify_player_;
+#endif
     uint32_t notification_playback_id_ = 0;
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
     std::unique_ptr<Ota> ota_;
+#endif
 
     std::function<void(const std::string&)> mcp_broadcast_callback_;
 
@@ -169,7 +195,9 @@ private:
     void ContinueWakeWordInvoke(const std::string& wake_word);
     void StartListeningAudio();
     void ConfigureWakeWordForListening();
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
     void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);
+#endif
     void StopNotification();
     void HandleNotificationFinished(uint32_t playback_id, bool success);
 

@@ -3,6 +3,7 @@
 #include "ota_bootstrap.h"
 #include "websocket_bootstrap.h"
 #include "wifi_sdk_bridge.h"
+#include "platform/application_runtime.h"
 
 #include <algorithm>
 #include <atomic>
@@ -43,6 +44,13 @@ std::atomic<uint32_t> info_completed{0};
 std::atomic<bool> info_valid{false};
 TaskHandle_t network_task;
 uint32_t info_sequence = 0;
+const ApplicationSessionHooks* application_hooks = nullptr;
+
+void PostApplicationEvent(ApplicationRuntimeEvent event) {
+    if (application_hooks && application_hooks->post_event)
+        application_hooks->post_event(application_hooks->context, event);
+}
+
 char configured_ssid[33];
 char configured_password[65];
 
@@ -295,6 +303,7 @@ void ParkTask() {
 void NetworkTask(void*) {
     network_task = xTaskGetCurrentTaskHandle();
     if (!InitializeNetwork(network_task)) {
+        PostApplicationEvent(ApplicationRuntimeEvent::Failed);
         ParkTask();
         return;
     }
@@ -329,15 +338,22 @@ void NetworkTask(void*) {
                 RetryAfter("Wi-Fi association/DHCP", wifi_delay);
                 continue;
             }
+            PostApplicationEvent(ApplicationRuntimeEvent::NetworkReady);
             need_address = false;
             reset_station = true;
             probe_ready = ota_ready = false;
             wifi_delay = service_delay = kRetryFirstMs;
         }
         if (!NetworkAvailable()) {
+            PostApplicationEvent(ApplicationRuntimeEvent::Offline);
             ESP_LOGW(TAG, "WIFI_OFFLINE: old audio/session stopped; reconnecting hotspot");
             need_address = true;
             RetryAfter("Wi-Fi lost", wifi_delay);
+            continue;
+        }
+        if (application_hooks && application_hooks->listening_enabled &&
+            !application_hooks->listening_enabled(application_hooks->context)) {
+            vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
         // Keep a healthy Wi-Fi connection when only the Internet/server fails.
@@ -348,10 +364,14 @@ void NetworkTask(void*) {
             (!ota_ready || xTaskGetTickCount() - last_ota >= pdMS_TO_TICKS(60000))) {
             ota_ready = RunOriginalOtaCheck();
             last_ota = xTaskGetTickCount();
+            if (ota_ready)
+                PostApplicationEvent(ApplicationRuntimeEvent::ActivationReady);
         }
         if (probe_ready && ota_ready && NetworkAvailable()) {
             const TickType_t session_started = xTaskGetTickCount();
-            const bool complete = RunOriginalWebsocketHandshake(0, NetworkAvailable);
+            const bool complete = RunOriginalWebsocketHandshake(0, NetworkAvailable, application_hooks);
+            if (!complete)
+                PostApplicationEvent(ApplicationRuntimeEvent::Failed);
             if (xTaskGetTickCount() - session_started >= pdMS_TO_TICKS(60000))
                 service_delay = kRetryFirstMs;
             if (complete) {
@@ -368,7 +388,8 @@ void NetworkTask(void*) {
 
 }  // namespace
 
-bool StartWifiInitialization(const char* ssid, const char* password) {
+bool StartWifiInitialization(const char* ssid, const char* password,
+                             const ApplicationSessionHooks* hooks) {
     static bool started = false;
     if (started) {
         return true;
@@ -378,6 +399,7 @@ bool StartWifiInitialization(const char* ssid, const char* password) {
         ESP_LOGW(TAG, "WIFI_INIT_FAILED: invalid credential length (SSID <=32, key <=64)");
         return false;
     }
+    application_hooks = hooks;
     std::strcpy(configured_ssid, ssid);
     std::strcpy(configured_password, password);
     started = true;

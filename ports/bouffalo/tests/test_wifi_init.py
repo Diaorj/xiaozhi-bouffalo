@@ -135,7 +135,8 @@ bool RunOriginalOtaCheck() {
     assert(!in_event_callback); ++ota_calls;
     return mode != 33 || ota_calls > 1;
 }
-bool RunOriginalWebsocketHandshake(unsigned rounds, bool (*available)()) {
+bool RunOriginalWebsocketHandshake(unsigned rounds, bool (*available)(), const ApplicationSessionHooks* hooks) {
+    assert(hooks == nullptr);
     assert(!in_event_callback && rounds == 0 && available && available());
     ++wss_calls;
     if (mode == 30 && wss_calls == 1) {
@@ -354,7 +355,7 @@ class WifiInitializationTests(unittest.TestCase):
                 '#define ESP_LOGI(tag, fmt, ...) printf("[%s] " fmt "\\n", tag, ##__VA_ARGS__)\n'
                 '#define ESP_LOGW ESP_LOGI\n')
             (work / "check.cc").write_text(HARNESS)
-            includes = ["-I" + str(work), "-I" + str(PORT)]
+            includes = ["-I" + str(work), "-I" + str(PORT), "-I" + str(PORT.parents[1] / "main")]
             subprocess.run(["gcc", "-std=c99", "-Wall", "-Wextra", "-Werror", *includes,
                             "-c", str(PORT / "wifi_sdk_bridge.c"), "-o", str(work / "bridge.o")],
                            check=True)

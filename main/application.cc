@@ -1,4 +1,5 @@
 #include "application.h"
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 #include "assets.h"
 #include "assets/lang_config.h"
 #include "audio_codec.h"
@@ -19,8 +20,13 @@
 #include <cstring>
 #include <limits>
 
+#else
+#include <esp_log.h>
+#endif
+
 #define TAG "Application"
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 Application::Application() : notify_player_(audio_service_) {
     event_group_ = xEventGroupCreate();
 
@@ -46,7 +52,9 @@ Application::Application() : notify_player_(audio_service_) {
                                                 .skip_unhandled_events = true};
     esp_timer_create(&clock_timer_args, &clock_timer_handle_);
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 Application::~Application() {
     notify_player_.Stop();
     if (clock_timer_handle_ != nullptr) {
@@ -55,9 +63,11 @@ Application::~Application() {
     }
     vEventGroupDelete(event_group_);
 }
+#endif
 
 bool Application::SetDeviceState(DeviceState state) { return state_machine_.TransitionTo(state); }
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::Initialize() {
     auto& board = Board::GetInstance();
     SetDeviceState(kDeviceStateStarting);
@@ -172,6 +182,7 @@ void Application::Initialize() {
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);
 }
+#endif
 
 void Application::Run() {
     // Set the priority of the main task to 10
@@ -184,16 +195,33 @@ void Application::Run() {
         MAIN_EVENT_START_LISTENING | MAIN_EVENT_STOP_LISTENING | MAIN_EVENT_ACTIVATION_DONE |
         MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_PLAYBACK_DRAINED;
 
+#ifdef XIAOZHI_APPLICATION_PLATFORM_BACKEND
+    TickType_t last_tick = xTaskGetTickCount();
+#endif
     while (true) {
+#ifdef XIAOZHI_APPLICATION_PLATFORM_BACKEND
+        auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE,
+                                        pdMS_TO_TICKS(1000));
+        const TickType_t now = xTaskGetTickCount();
+        if (now - last_tick >= pdMS_TO_TICKS(1000)) {
+            bits |= MAIN_EVENT_CLOCK_TICK;
+            last_tick = now;
+        }
+#else
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
+#endif
 
         if (bits & MAIN_EVENT_ERROR) {
+#ifdef XIAOZHI_APPLICATION_PLATFORM_BACKEND
+            HandleRuntimeEvent(ApplicationRuntimeEvent::Failed);
+#else
             if (GetDeviceState() == kDeviceStateNotifying) {
                 StopNotification();
             }
             SetDeviceState(kDeviceStateIdle);
             Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "cancel",
                   Lang::Sounds::OGG_EXCLAMATION);
+#endif
         }
 
         if (bits & MAIN_EVENT_NETWORK_CONNECTED) {
@@ -213,6 +241,9 @@ void Application::Run() {
         }
 
         if (bits & MAIN_EVENT_PLAYBACK_DRAINED) {
+#ifdef XIAOZHI_APPLICATION_PLATFORM_BACKEND
+            HandlePlaybackDrainedEvent();
+#else
             if (audio_service_.IsPlaybackIdle()) {
                 notify_player_.OnPlaybackDrained();
             }
@@ -223,6 +254,7 @@ void Application::Run() {
                 pending_listening_start_ = false;
                 StartListeningAudio();
             }
+#endif
         }
 
         if (bits & MAIN_EVENT_TOGGLE_CHAT) {
@@ -237,6 +269,7 @@ void Application::Run() {
             HandleStopListeningEvent();
         }
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
         if (bits & MAIN_EVENT_SEND_AUDIO) {
             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
                 if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
@@ -262,6 +295,7 @@ void Application::Run() {
             }
         }
 
+#endif
         if (bits & MAIN_EVENT_SCHEDULE) {
             std::unique_lock<std::mutex> lock(mutex_);
             auto tasks = std::move(main_tasks_);
@@ -273,12 +307,18 @@ void Application::Run() {
 
         if (bits & MAIN_EVENT_CLOCK_TICK) {
             clock_ticks_++;
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
-
+#endif
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
                 SystemInfo::PrintHeapStats();
+#else
+                ESP_LOGI(TAG, "APP_RUNNING: state=%s",
+                         DeviceStateMachine::GetStateName(GetDeviceState()));
+#endif
                 // SystemInfo::PrintTaskList();
                 // SystemInfo::PrintTaskCpuUsage(pdMS_TO_TICKS(1000));
             }
@@ -286,6 +326,7 @@ void Application::Run() {
     }
 }
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
     auto state = GetDeviceState();
@@ -312,7 +353,9 @@ void Application::HandleNetworkConnectedEvent() {
     auto display = Board::GetInstance().GetDisplay();
     display->UpdateStatusBar(true);
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::HandleNetworkDisconnectedEvent() {
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
@@ -329,7 +372,9 @@ void Application::HandleNetworkDisconnectedEvent() {
     auto display = Board::GetInstance().GetDisplay();
     display->UpdateStatusBar(true);
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::HandleActivationDoneEvent() {
     ESP_LOGI(TAG, "Activation done");
 
@@ -361,7 +406,9 @@ void Application::HandleActivationDoneEvent() {
         });
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::ActivationTask() {
     // Create OTA object for activation process
     ota_ = std::make_unique<Ota>();
@@ -378,7 +425,9 @@ void Application::ActivationTask() {
     // Signal completion to main loop
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::CheckAssetsVersion() {
     // Only allow CheckAssetsVersion to be called once
     if (assets_version_checked_) {
@@ -438,7 +487,9 @@ void Application::CheckAssetsVersion() {
     display->SetChatMessage("system", "");
     display->SetEmotion("robot_2");
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::CheckNewVersion() {
     const int MAX_RETRY = 10;
     int retry_count = 0;
@@ -527,7 +578,9 @@ void Application::CheckNewVersion() {
         }
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::InitializeProtocol() {
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
@@ -724,7 +777,9 @@ void Application::InitializeProtocol() {
 
     protocol_->Start();
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
     struct digit_sound {
         char digit;
@@ -748,7 +803,9 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
         }
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::Alert(const char* status, const char* message, const char* emotion,
                         const std::string_view& sound) {
     ESP_LOGW(TAG, "Alert [%s] %s: %s", emotion, status, message);
@@ -760,7 +817,9 @@ void Application::Alert(const char* status, const char* message, const char* emo
         audio_service_.PlaySound(sound);
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::DismissAlert() {
     last_error_message_.clear();
     if (GetDeviceState() == kDeviceStateIdle) {
@@ -770,6 +829,7 @@ void Application::DismissAlert() {
         display->SetChatMessage("system", "");
     }
 }
+#endif
 
 void Application::ToggleChatState() { xEventGroupSetBits(event_group_, MAIN_EVENT_TOGGLE_CHAT); }
 
@@ -777,6 +837,7 @@ void Application::StartListening() { xEventGroupSetBits(event_group_, MAIN_EVENT
 
 void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING); }
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
 
@@ -818,7 +879,9 @@ void Application::HandleToggleChatEvent() {
         protocol_->CloseAudioChannel();
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     // Check state again in case it was changed during scheduling
     if (GetDeviceState() != kDeviceStateConnecting) {
@@ -840,7 +903,9 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 
     SetListeningMode(mode);
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::HandleStartListeningEvent() {
     auto state = GetDeviceState();
 
@@ -876,7 +941,9 @@ void Application::HandleStartListeningEvent() {
         SetListeningMode(kListeningModeManualStop);
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::HandleStopListeningEvent() {
     auto state = GetDeviceState();
 
@@ -893,7 +960,9 @@ void Application::HandleStopListeningEvent() {
         SetDeviceState(kDeviceStateIdle);
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::HandleWakeWordDetectedEvent() {
     if (!protocol_) {
         return;
@@ -930,7 +999,9 @@ void Application::HandleWakeWordDetectedEvent() {
         SetDeviceState(kDeviceStateIdle);
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::BeginWakeWordInvoke(const std::string& wake_word) {
     // Must run in the main task with the device in idle state
     audio_service_.EncodeWakeWord();
@@ -954,7 +1025,9 @@ void Application::BeginWakeWordInvoke(const std::string& wake_word) {
     // Channel already opened, continue directly
     ContinueWakeWordInvoke(wake_word);
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     // Check state again in case it was changed during scheduling
     if (GetDeviceState() != kDeviceStateConnecting) {
@@ -991,7 +1064,9 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     SetListeningMode(GetDefaultListeningMode());
 #endif
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::HandleStateChangedEvent() {
     DeviceState new_state = state_machine_.GetState();
     clock_ticks_ = 0;
@@ -1067,7 +1142,9 @@ void Application::HandleStateChangedEvent() {
             break;
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::StartListeningAudio() {
     // Runs in the main loop, either directly from HandleStateChangedEvent or
     // deferred via MAIN_EVENT_PLAYBACK_DRAINED once the playback queue drains.
@@ -1087,7 +1164,9 @@ void Application::StartListeningAudio() {
         audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::ConfigureWakeWordForListening() {
 #ifdef CONFIG_WAKE_WORD_DETECTION_IN_LISTENING
     // Enable wake word detection in listening mode (configured via Kconfig)
@@ -1097,7 +1176,9 @@ void Application::ConfigureWakeWordForListening() {
     audio_service_.EnableWakeWordDetection(false);
 #endif
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles) {
     if (GetDeviceState() != kDeviceStateIdle || notify_player_.IsBusy()) {
         ESP_LOGW(TAG, "Ignoring notify message while device is busy");
@@ -1143,7 +1224,9 @@ void Application::StartNotification(std::string audio_url, std::vector<NotifySub
         StopNotification();
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::StopNotification() {
     notify_player_.Stop();
     audio_service_.ResetDecoder();
@@ -1154,7 +1237,9 @@ void Application::StopNotification() {
         SetDeviceState(kDeviceStateIdle);
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::HandleNotificationFinished(uint32_t playback_id, bool success) {
     if (GetDeviceState() != kDeviceStateNotifying || notification_playback_id_ != playback_id) {
         return;
@@ -1163,6 +1248,7 @@ void Application::HandleNotificationFinished(uint32_t playback_id, bool success)
              success ? "completed" : "failed");
     StopNotification();
 }
+#endif
 
 void Application::Schedule(std::function<void()>&& callback) {
     {
@@ -1172,6 +1258,7 @@ void Application::Schedule(std::function<void()>&& callback) {
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
 }
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
@@ -1179,16 +1266,22 @@ void Application::AbortSpeaking(AbortReason reason) {
         protocol_->SendAbortSpeaking(reason);
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::SetListeningMode(ListeningMode mode) {
     listening_mode_ = mode;
     SetDeviceState(kDeviceStateListening);
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 ListeningMode Application::GetDefaultListeningMode() const {
     return aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime;
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::Reboot() {
     ESP_LOGI(TAG, "Rebooting...");
     if (GetDeviceState() == kDeviceStateNotifying) {
@@ -1204,7 +1297,9 @@ void Application::Reboot() {
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 bool Application::UpgradeFirmware(const std::string& url, const std::string& version) {
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
@@ -1263,7 +1358,9 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
         return true;
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::WakeWordInvoke(const std::string& wake_word) {
     if (!protocol_) {
         return;
@@ -1296,7 +1393,9 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
         });
     }
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 bool Application::CanEnterSleepMode() {
     if (GetDeviceState() != kDeviceStateIdle) {
         return false;
@@ -1313,11 +1412,15 @@ bool Application::CanEnterSleepMode() {
     // Now it is safe to enter sleep mode
     return true;
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::RegisterMcpBroadcastCallback(std::function<void(const std::string&)> callback) {
     mcp_broadcast_callback_ = std::move(callback);
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::SendMcpMessage(const std::string& payload) {
     // Always schedule to run in main task for thread safety
     Schedule([this, payload]() {
@@ -1329,7 +1432,9 @@ void Application::SendMcpMessage(const std::string& payload) {
         }
     });
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::SetAecMode(AecMode mode) {
     aec_mode_ = mode;
     Schedule([this]() {
@@ -1356,9 +1461,13 @@ void Application::SetAecMode(AecMode mode) {
         }
     });
 }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::PlaySound(const std::string_view& sound) { audio_service_.PlaySound(sound); }
+#endif
 
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
 void Application::ResetProtocol() {
     Schedule([this]() {
         if (GetDeviceState() == kDeviceStateNotifying) {
@@ -1372,3 +1481,4 @@ void Application::ResetProtocol() {
         protocol_.reset();
     });
 }
+#endif

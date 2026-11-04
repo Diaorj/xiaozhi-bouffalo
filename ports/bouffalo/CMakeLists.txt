@@ -17,8 +17,24 @@ sdk_add_include_directories("${CMAKE_CURRENT_LIST_DIR}")
 sdk_set_main_file("${CMAKE_CURRENT_LIST_DIR}/main.cc")
 
 project(xiaozhi_bouffalo)
+
+# Hardware bring-up only. Run before tasks so synchronous DBI fills cannot
+# block Application/audio; keep the original ESP32 build path untouched.
+option(XIAOZHI_SCREEN_TEST "Show the U10 ST7796 test pattern at boot" ON)
+if(XIAOZHI_SCREEN_TEST)
+    if(NOT CHIP STREQUAL "bl616cl" OR NOT CONFIG_BSP_LCD)
+        message(FATAL_ERROR "U10 screen test requires BL616CL and CONFIG_BSP_LCD=y")
+    endif()
+    target_sources(app PRIVATE "${CMAKE_CURRENT_LIST_DIR}/screen_test.c")
+endif()
+target_compile_definitions(${CMAKE_PROJECT_NAME}.elf PRIVATE
+    XIAOZHI_SCREEN_TEST=$<BOOL:${XIAOZHI_SCREEN_TEST}>)
+
 target_sources(app PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/../../main/device_state_machine.cc"
+    "${CMAKE_CURRENT_LIST_DIR}/../../main/application.cc"
+    "${CMAKE_CURRENT_LIST_DIR}/../../main/application_platform.cc"
+    "${CMAKE_CURRENT_LIST_DIR}/application_bouffalo.cc"
     "${CMAKE_CURRENT_LIST_DIR}/wifi_init.cc"
     "${CMAKE_CURRENT_LIST_DIR}/network_probe.cc"
     "${CMAKE_CURRENT_LIST_DIR}/ota_bootstrap.cc"
@@ -110,9 +126,10 @@ foreach(header IN LISTS network_headers)
     file(WRITE "${network_include}/${name}" "${content}")
 endforeach()
 foreach(target app ${CMAKE_PROJECT_NAME}.elf)
-    target_compile_definitions(${target} PRIVATE XIAOZHI_PLATFORM_BOUFFALO=1 XIAOZHI_AUDIO_PLATFORM_BACKEND=1)
+    target_compile_definitions(${target} PRIVATE XIAOZHI_PLATFORM_BOUFFALO=1 XIAOZHI_AUDIO_PLATFORM_BACKEND=1 XIAOZHI_APPLICATION_PLATFORM_BACKEND=1)
     target_include_directories(${target} PRIVATE "${network_include}"
-        "${CMAKE_CURRENT_LIST_DIR}/../../main/boards/common"
+        "${CMAKE_CURRENT_LIST_DIR}/../../main/audio"
+    "${CMAKE_CURRENT_LIST_DIR}/../../main/boards/common"
         "${CMAKE_CURRENT_LIST_DIR}/../../main/protocols"
         "${CMAKE_CURRENT_LIST_DIR}/../../third_party/tl-expected/include")
 endforeach()

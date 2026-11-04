@@ -1,6 +1,6 @@
 #pragma once
 
-#define XIAOZHI_BUILD_TAG "network-recovery-20261103-v7"
+#define XIAOZHI_BUILD_TAG "screen-20261104-v10"
 
 #ifdef __cplusplus
 extern "C" {

@@ -67,7 +67,7 @@ int HttpSdkVerifiedPostJson(const http_sdk_json_post_t* req,unsigned timeout,cha
 }
 int HttpSdkVerifiedGetBody(const http_sdk_json_post_t*,unsigned,char*,size_t,http_sdk_response_t*) { assert(false);return -1; }
 }
-bool StartWifiInitialization(const char*,const char*) { return true; }
+bool StartWifiInitialization(const char*,const char*, const ApplicationSessionHooks*) { return true; }
 int main(int argc,char** argv) {
     assert(argc==2);mode=std::atoi(argv[1]);
     bool ok=RunOriginalOtaCheck();

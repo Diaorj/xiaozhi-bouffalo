@@ -2,15 +2,9 @@
 
 #include <esp_log.h>
 
-#include "device_state_machine.h"
+#include "application.h"
 #include "memory_diagnostics.h"
-#include "wifi_init.h"
-
-#if __has_include("wifi_config.h")
-#include "wifi_config.h"
-#else
-#include "wifi_config.example.h"
-#endif
+#include "screen_test.h"
 
 // These SDK and FreeRTOS functions are implemented in C.
 extern "C" {
@@ -28,35 +22,14 @@ static ConstructorProbe constructor_probe;
 
 static const char* const TAG = "XIAOZHI_PORT";
 
-static void heartbeat_task(void* arg) {
-    (void)arg;
-    ESP_LOGI(TAG, "TASK_RUNNING: heartbeat");
-    // This is only a state-machine smoke test, not real activation or networking.
-    DeviceStateMachine states;
-    const int listener =
-        states.AddStateChangeListener([](DeviceState old_state, DeviceState new_state) {
-            ESP_LOGI(TAG, "STATE_CALLBACK: %s -> %s", DeviceStateMachine::GetStateName(old_state),
-                     DeviceStateMachine::GetStateName(new_state));
-        });
-    bool ok = states.TransitionTo(kDeviceStateStarting);
-    ok = states.TransitionTo(kDeviceStateActivating) && ok;
-    ok = states.TransitionTo(kDeviceStateIdle) && ok;
-    // idle -> starting is forbidden: it must fail and leave the state unchanged.
-    ok = !states.TransitionTo(kDeviceStateStarting) && ok;
-    ok = states.GetState() == kDeviceStateIdle && ok;
-    states.RemoveStateChangeListener(listener);
-    ESP_LOGI(TAG, "STATE_MACHINE_%s: current=%s (demo only)", ok ? "OK" : "FAILED",
-             DeviceStateMachine::GetStateName(states.GetState()));
-
-    if (!StartWifiInitialization(XIAOZHI_WIFI_SSID, XIAOZHI_WIFI_PASSWORD)) {
-        ESP_LOGW(TAG, "NETWORK_INIT_NOT_STARTED: heartbeat will continue");
-    }
-
-    unsigned int seconds = 0;
-    while (true) {
+static void application_task(void*) {
+    ESP_LOGI(TAG, "TASK_RUNNING: original Application");
+    auto& app = Application::GetInstance();
+    app.Initialize();
+    app.Run();
+    ESP_LOGE(TAG, "APPLICATION_EXITED: unexpected main loop return");
+    for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
-        ++seconds;
-        ESP_LOGI(TAG, "FreeRTOS alive=%u s", seconds);
     }
 }
 
@@ -72,8 +45,14 @@ int main() {
     std::printf("[XIAOZHI_PORT] CXX_RUNTIME_OK: constructors=%u\r\n", constructor_runs);
     std::printf("\r\n[XIAOZHI_PORT] BOOT_OK: BL616CL C++ FreeRTOS entry\r\n");
 
+#if XIAOZHI_SCREEN_TEST
+    if (RunScreenBringupTest() != 0) {
+        std::printf("[W][XIAOZHI_PORT] SCREEN_TEST_FAILED: continuing voice startup\r\n");
+    }
+#endif
+
     // Stack depth is in StackType_t units: 1024 * 4 bytes on BL616CL.
-    if (xTaskCreate(heartbeat_task, "heartbeat", 1024, nullptr, 1, nullptr) != pdPASS) {
+    if (xTaskCreate(application_task, "application", 1024, nullptr, 1, nullptr) != pdPASS) {
         std::printf("[XIAOZHI_PORT] TASK_CREATE_FAILED\r\n");
         while (true) {
         }

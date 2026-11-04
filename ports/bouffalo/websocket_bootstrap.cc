@@ -8,6 +8,7 @@
 #include "opus_decoder_bouffalo.h"
 #include "protocols/websocket_protocol.h"
 #include "settings.h"
+#include "platform/application_runtime.h"
 #if XIAOZHI_VOICE_INPUT_TEST
 #include "voice_input.h"
 #endif
@@ -31,13 +32,39 @@ struct ReplyState {
         failure.compare_exchange_strong(empty, reason);
     }
 };
+#ifndef XIAOZHI_APPLICATION_PLATFORM_BACKEND
+AudioService& StandaloneAudioService() {
+    static AudioService audio;
+    return audio;
+}
+WebsocketProtocol& StandaloneWebsocketProtocol() {
+    static WebsocketProtocol protocol;
+    return protocol;
+}
+#endif
 }  // namespace
 
-bool RunOriginalWebsocketHandshake(unsigned max_rounds, bool (*network_available)()) {
-    // Static lifetime: the original protocol retains its callbacks after startup.
-    static AudioService audio;
+bool RunOriginalWebsocketHandshake(unsigned max_rounds, bool (*network_available)(),
+                                   const ApplicationSessionHooks* hooks) {
+    // Application owns the session objects; standalone host tests use static objects.
+#ifdef XIAOZHI_APPLICATION_PLATFORM_BACKEND
+    if (!hooks || !hooks->audio_service || !hooks->websocket) {
+        ESP_LOGE("WS", "APPLICATION_SESSION_MISSING: no standalone fallback in this build");
+        return false;
+    }
+    AudioService& audio = *hooks->audio_service;
+    WebsocketProtocol& protocol = *hooks->websocket;
+#else
+    AudioService& audio = hooks && hooks->audio_service ? *hooks->audio_service :
+                          StandaloneAudioService();
+    WebsocketProtocol& protocol = hooks && hooks->websocket ? *hooks->websocket :
+                                  StandaloneWebsocketProtocol();
+#endif
+    const auto post_event = [hooks](ApplicationRuntimeEvent event) {
+        if (hooks && hooks->post_event)
+            hooks->post_event(hooks->context, event);
+    };
     static ReplyState reply;
-    static WebsocketProtocol protocol;
     reply.active = false;
     reply.ended = false;
     reply.failure = nullptr;
@@ -69,10 +96,10 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds, bool (*network_available
         ESP_LOGI("WS", "WS_SESSION_RELEASED: socket and receiver released");
         MemoryDiagnosticsStage("after_ws_session_close");
     };
-    protocol.OnIncomingAudio([](std::unique_ptr<AudioStreamPacket> packet) {
+    protocol.OnIncomingAudio([audio_ptr = &audio](std::unique_ptr<AudioStreamPacket> packet) {
         if (!reply.active)
             return;
-        if (reply.ended || !audio.PushPacketToDecodeQueue(std::move(packet), false)) {
+        if (reply.ended || !audio_ptr->PushPacketToDecodeQueue(std::move(packet), false)) {
             reply.Fail("audio queue rejected packet");
             return;
         }
@@ -83,7 +110,7 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds, bool (*network_available
             ESP_LOGI("WS", "REPLY_FIRST_AUDIO: after_request_ms=%u",
                      unsigned((now - reply.request_finished.load()) * portTICK_PERIOD_MS));
     });
-    protocol.OnIncomingJson([](const cJSON* root) {
+    protocol.OnIncomingJson([post_event](const cJSON* root) {
         auto* type = cJSON_GetObjectItem(root, "type");
         if (!cJSON_IsString(type))
             return;
@@ -96,7 +123,8 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds, bool (*network_available
             }
             if (std::strcmp(type->valuestring, "tts") == 0 && cJSON_IsString(state) &&
                 std::strcmp(state->valuestring, "start") == 0) {
-                reply.tts_started = true;
+                if (!reply.tts_started.exchange(true))
+                    post_event(ApplicationRuntimeEvent::Speaking);
             }
         }
         if (std::strcmp(type->valuestring, "tts") == 0) {
@@ -163,6 +191,7 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds, bool (*network_available
         }
 #endif
         if (completed == 0) {
+            post_event(ApplicationRuntimeEvent::Connecting);
             const TickType_t connect_started = xTaskGetTickCount();
             if (!protocol.Start() || !protocol.OpenAudioChannel()) {
                 protocol.CloseAudioChannel(false);
@@ -174,6 +203,8 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds, bool (*network_available
                      protocol.server_sample_rate(), protocol.server_frame_duration(),
                      unsigned((xTaskGetTickCount() - connect_started) * portTICK_PERIOD_MS));
         }
+        if (completed == 0)
+            post_event(ApplicationRuntimeEvent::SessionReady);
         reply.ended = false;
         reply.failure = nullptr;
         reply.packets = 0;
@@ -190,9 +221,23 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds, bool (*network_available
             close_session();
             return false;
         }
+        if (hooks && hooks->take_listening_request) {
+            ESP_LOGI("VOICE", "APP_LISTEN_WAIT: Application owns the next capture");
+            while (!hooks->take_listening_request(hooks->context)) {
+                if (!online() || !protocol.Heartbeat() || reply.failure.load()) {
+                    close_session();
+                    return false;
+                }
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+        }
         if (!input.StartCapture())
             reply.Fail("capture worker start failed");
         for (;;) {
+            if (hooks && hooks->listening_enabled && !hooks->listening_enabled(hooks->context)) {
+                reply.Fail("listening paused by Application");
+                break;
+            }
             if (!online()) {
                 reply.Fail("Wi-Fi link/IP lost while listening; interrupted audio discarded");
                 break;
@@ -206,6 +251,7 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds, bool (*network_available
                 break;
             }
             if (input.VoiceStarted() && !listen_started) {
+                post_event(ApplicationRuntimeEvent::VoiceStarted);
                 protocol.SendStartListening(kListeningModeManualStop);
                 listen_started = true;
             }
@@ -264,6 +310,7 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds, bool (*network_available
             return false;
         }
         reply.request_finished = xTaskGetTickCount();
+        post_event(ApplicationRuntimeEvent::WaitingReply);
         protocol.SendStopListening();
         ESP_LOGI("VOICE", "VOICE_UPLOADED: packets=%u bytes=%u; waiting for recognition and reply",
                  unsigned(sent), unsigned(sent_bytes));
@@ -280,6 +327,10 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds, bool (*network_available
         reply.last_packet = started;
         bool ok = false;
         for (;;) {
+            if (hooks && hooks->listening_enabled && !hooks->listening_enabled(hooks->context)) {
+                reply.Fail("conversation paused by Application");
+                break;
+            }
             if (!online()) {
                 reply.Fail("Wi-Fi link/IP lost during reply");
                 break;
@@ -325,6 +376,7 @@ bool RunOriginalWebsocketHandshake(unsigned max_rounds, bool (*network_available
         ++completed;
         ESP_LOGI("Audio", "AUDIO_REPLY_DONE: round=%u packets=%u; speaker drained and muted",
                  completed, reply.packets.load());
+        post_event(ApplicationRuntimeEvent::PlaybackFinished);
         if (limit && completed >= limit) {
             close_session();
             return true;

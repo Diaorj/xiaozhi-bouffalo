@@ -200,13 +200,19 @@ int main(int argc,char** argv) {
     puts("FULL_AUDIO_TEST_OK");
 }
 """
-            voice_tests=getattr(self,'voice_input_tests',False)
+            application_tests=getattr(self,'application_tests',False)
+            voice_tests=getattr(self,'voice_input_tests',False) or application_tests
             if voice_tests:
                 from voice_input_harness import customize
                 t=customize(t)
+            if application_tests:
+                from application_voice_harness import customize as customize_application
+                t=customize_application(t)
+                (work/'FreeRTOS.h').write_text((work/'FreeRTOS.h').read_text()+'\ntypedef int BaseType_t;\n')
+                (work/'task.h').write_text((work/'task.h').read_text()+'\nvoid vTaskPrioritySet(TaskHandle_t,BaseType_t);BaseType_t uxTaskPriorityGet(TaskHandle_t);\n')
             (work/'check.cc').write_text(t)
             subprocess.run(['gcc','-std=c99','-c',str(CJSON/'cJSON.c'),'-o',str(work/'json.o')],check=True)
-            include=[work,work/'interfaces',PORT,PORT/'compat',ROOT/'main',ROOT/'main/boards/common',ROOT/'main/protocols',ROOT/'third_party/tl-expected/include',CJSON,opus/'include']
+            include=[work,work/'interfaces',PORT,PORT/'compat',ROOT/'main',ROOT/'main/boards/common',ROOT/'main/protocols',ROOT/'main/audio',ROOT/'third_party/tl-expected/include',CJSON,opus/'include']
             sources=[ROOT/'main/protocols/protocol.cc',ROOT/'main/protocols/websocket_protocol.cc',ROOT/'main/audio/audio_codec.cc',ROOT/'main/audio/audio_service.cc',*[PORT/x for x in ['tcp_bouffalo.cc','websocket_support.cc','opus_decoder_bouffalo.cc','audio_codec_bouffalo.cc','websocket_bootstrap.cc']],work/'web_socket.cc',work/'check.cc',work/'json.o',work/'build/libhost_opus.a']
             extra=[]
             if voice_tests:
@@ -214,7 +220,20 @@ int main(int argc,char** argv) {
                 subprocess.run(['gcc','-std=c99','-I'+str(PORT),'-c',str(PORT/'audio_vad.c'),'-o',str(work/'vad.o')],check=True)
                 sources.insert(-1,work/'vad.o')
                 extra=['-DXIAOZHI_VOICE_INPUT_TEST=1']
+            if application_tests:
+                sources[0:0]=[ROOT/'main/application.cc',ROOT/'main/application_platform.cc',ROOT/'main/device_state_machine.cc',PORT/'application_bouffalo.cc']
+                extra+=['-DXIAOZHI_APPLICATION_PLATFORM_BACKEND=1','-DXIAOZHI_AUTO_CHAT=1']
             subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-pthread','-DXIAOZHI_PLATFORM_BOUFFALO=1','-DXIAOZHI_AUDIO_PLATFORM_BACKEND=1',*extra,*['-I'+str(x) for x in include],*[str(x) for x in sources],'-lm','-o',str(work/'check')],check=True)
+            if application_tests:
+                for case in (0,1,2,3):
+                    with self.subTest(case=case):
+                        result=subprocess.run([str(work/'check'),str(case)],capture_output=True,text=True,timeout=25)
+                        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                        self.assertIn('APPLICATION_VOICE_TEST_OK',result.stdout)
+                        self.assertNotIn('Invalid state transition',result.stdout)
+                        self.assertEqual(result.stdout.count('AUDIO_REPLY_DONE:'),3)
+                        self.assertGreaterEqual(result.stdout.count('APP_LISTEN_GRANTED'),3)
+                return
             if voice_tests:
                 for case in [0,3,20,21,22,23,24,25,26,27,30,31,32,33,34,35,36,37,38,39]:
                     with self.subTest(case=case):
